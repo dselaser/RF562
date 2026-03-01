@@ -989,6 +989,14 @@ void HPSwitchTask(void *argument)
             int32_t err = target_adc - (int32_t)pos;
             g_vca_err = err;
 
+            /* MOVE 중 ADC 동결 → 그래프에 목표 ADC 표시 (2단계 상승 방지) */
+            {
+                int32_t ta = target_adc;
+                if (ta < 0) ta = 0;
+                if (ta > 65535) ta = 65535;
+                g_vca_pos_adc = (uint16_t)ta;
+            }
+
             /* 하드 리밋 */
             if ((int32_t)pos >= (int32_t)VCA_ADC_MAX_SAFE) {
                 Loop1_Stop();
@@ -1080,7 +1088,7 @@ void HPSwitchTask(void *argument)
             if (depth < 0.0f) depth = 0.0f;
 
             float duty_hold = HOLD_FF_SLOPE * depth;
-            if (duty_hold < 0.05f) duty_hold = 0.05f;
+            if (duty_hold < 0.10f) duty_hold = 0.10f;
             if (duty_hold > HOLD_DUTY_MAX) duty_hold = HOLD_DUTY_MAX;
 
             TLE9201_SetDir(DIR_PUSH);
