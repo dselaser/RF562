@@ -1,0 +1,4 @@
+../Core/Src/vca_stub.c:11:6:VCA_PID_SetGains	1
+../Core/Src/vca_stub.c:12:6:VCA_PID_GetGains	4
+../Core/Src/vca_stub.c:13:6:VCA_SetTargetADC	1
+../Core/Src/vca_stub.c:14:10:VCA_GetTargetADC	1

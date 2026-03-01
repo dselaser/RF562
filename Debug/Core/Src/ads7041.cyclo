@@ -1,0 +1,2 @@
+../Core/Src/ads7041.c:29:10:ADS7041_Read	1
+../Core/Src/ads7041.c:55:6:ADS7041_UART2_Task	1

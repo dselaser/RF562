@@ -1,0 +1,4 @@
+../Core/Src/vca_control.c:9:6:VCA_Init	1
+../Core/Src/vca_control.c:15:6:VCA_Set	1
+../Core/Src/vca_control.c:20:6:VCA_StopBrake	1
+../Core/Src/vca_control.c:26:6:VCA_Disable	1

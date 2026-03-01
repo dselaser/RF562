@@ -1,0 +1,16 @@
+../Core/Src/tle9201.c:19:20:CSN_L	1
+../Core/Src/tle9201.c:20:20:CSN_H	1
+../Core/Src/tle9201.c:25:13:TLE9201_SetPWM_Frequency	7
+../Core/Src/tle9201.c:48:13:Xfer24	1
+../Core/Src/tle9201.c:55:17:ReadWithPipeline	1
+../Core/Src/tle9201.c:74:10:TLE92xx_ReadREV	1
+../Core/Src/tle9201.c:79:10:TLE92xx_ReadDIAG	1
+../Core/Src/tle9201.c:85:6:TLE9201_Enable	2
+../Core/Src/tle9201.c:97:6:TLE9201_SetDir	1
+../Core/Src/tle9201.c:101:6:TLE9201_SetPWM_duty	3
+../Core/Src/tle9201.c:110:13:TLE9201_SetSPIMode	2
+../Core/Src/tle9201.c:118:10:TLE9201_SPI_TxRx	2
+../Core/Src/tle9201.c:128:10:TLE9201_ReadRev	1
+../Core/Src/tle9201.c:134:10:TLE9201_ReadDiag	1
+../Core/Src/tle9201.c:140:6:TLE9201_ClearErrors	1
+../Core/Src/tle9201.c:146:6:TLE9201_Init	3

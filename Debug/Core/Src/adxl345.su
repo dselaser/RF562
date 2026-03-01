@@ -1,0 +1,5 @@
+../Core/Src/adxl345.c:33:26:adxl345_write_reg	32	static
+../Core/Src/adxl345.c:45:26:adxl345_read_reg	32	static
+../Core/Src/adxl345.c:56:6:ADXL345_Init_I2C2	16	static
+../Core/Src/adxl345.c:81:19:ADXL345_ReadRaw_I2C2	40	static
+../Core/Src/adxl345.c:108:6:ADXL345_UART2_Task	104	static
