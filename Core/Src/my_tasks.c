@@ -434,6 +434,8 @@ static void Loop1_SetTarget(int32_t i_target_mA)
  *  VCA_DB_HOLD  : 이 범위 안에서 FF duty만 → 진동 없음 (핵심)
  * ═════════════════════════════════════════════════════════════════════════*/
 #define HOLD_DUTY_FF          (0.360f) /* 유부하 실리콘 반발력 극복 */
+#define HOLD_FF_SLOPE         (0.24f)  /* duty/mm — 1.5mm에서 0.36 */
+#define HOLD_DUTY_MAX         (0.60f)  /* HOLD/MOVE 최대 duty */
 #define HOLD_KP               (0.000025f) /* P보정 */
 #define VCA_DB_HOLD           (2000)      /* 데드밴드 좁혀서 빠른 보정 */
 #define VCA_DB_MOVE           (400)
@@ -766,9 +768,15 @@ void HPSwitchTask(void *argument)
     if (last_in_push) {
         vca_on();
         TLE9201_SetDir(DIR_PUSH);
-        VCA_SetDuty(PROBE_DUTY);
+        {   /* PROBE duty = min(PROBE_DUTY, HOLD FF duty) */
+            float pd = HOLD_FF_SLOPE * g_needle_depth_mm;
+            if (pd < 0.10f) pd = 0.10f;
+            if (pd > PROBE_DUTY) pd = PROBE_DUTY;
+            VCA_SetDuty(pd);
+        }
         s_push_i_ma = PUSH_I_NO_LOAD;
         s_probe_t0  = osKernelGetTickCount();
+        g_motor_active = 1;  /* PROBE 시작 → ADC 동결 (EMI 방지) */
         s_state = VCA_PROBE_LOAD;
     } else {
         vca_off();
@@ -868,8 +876,13 @@ void HPSwitchTask(void *argument)
                 s_push_i_ma = PUSH_I_NO_LOAD;
                 vca_on();
                 TLE9201_SetDir(DIR_PUSH);
-                VCA_SetDuty(PROBE_DUTY);
+                {   float pd = HOLD_FF_SLOPE * g_needle_depth_mm;
+                    if (pd < 0.10f) pd = 0.10f;
+                    if (pd > PROBE_DUTY) pd = PROBE_DUTY;
+                    VCA_SetDuty(pd);
+                }
                 s_probe_t0 = now;
+                g_motor_active = 1;  /* PROBE 재진입 → ADC 동결 */
                 s_state    = VCA_PROBE_LOAD;
                 s_release_block_until = now + RELEASE_GRACE_MS;
                 release_t0 = 0U;
@@ -940,9 +953,28 @@ void HPSwitchTask(void *argument)
         case VCA_PROBE_LOAD: {
             g_state_dbg = 1;
             TLE9201_SetDir(DIR_PUSH);
-            VCA_SetDuty(PROBE_DUTY);
 
-            /* 전류 측정으로 부하 판별 */
+            /* PROBE duty = min(PROBE_DUTY, HOLD FF duty)
+             *  얕은 목표(G10): hold_duty(0.16) < PROBE_DUTY(0.28) → 0.16 사용
+             *  깊은 목표(G30): hold_duty(0.60) > PROBE_DUTY(0.28) → 0.28 사용
+             *  → 오버슈트 방지: PROBE가 HOLD보다 강하게 밀지 않음 */
+            {
+                float pd = HOLD_FF_SLOPE * g_needle_depth_mm;
+                if (pd < 0.10f) pd = 0.10f;
+                if (pd > PROBE_DUTY) pd = PROBE_DUTY;
+                VCA_SetDuty(pd);
+            }
+            g_motor_active = 1;  /* PROBE 중 ADC 동결 유지 */
+
+            /* PROBE 중 그래프에 목표 ADC 표시 */
+            {
+                int32_t ta = DEPTH_MM_TO_ADC(g_needle_depth_mm);
+                if (ta < 0) ta = 0;
+                if (ta > 65535) ta = 65535;
+                g_vca_pos_adc = (uint16_t)ta;
+            }
+
+            /* 전류 측정으로 부하 판별 (전류 ADC는 EMI 영향 적음) */
             int32_t i_now = g_i_meas_mA;
             if (i_now > (int32_t)PROBE_CURRENT_TH) {
                 /* 유부하: 피부 감지 → 높은 전류로 관통 */
@@ -950,9 +982,21 @@ void HPSwitchTask(void *argument)
                 s_push_i_ma = PUSH_I_LOADED;
             }
 
-            /* PROBE 완료 조건: 1mm 도달 또는 타임아웃 */
-            bool probe_done = ((int32_t)pos >= PROBE_ADC_END) ||
-                              ((now - s_probe_t0) >= PROBE_TIMEOUT_MS);
+            /* PROBE 완료: 목표 깊이에 비례한 시간 (최소 100ms 부하감지)
+             *  G10(얕음): 100ms → 과도 push 방지
+             *  G30(깊음): ~225ms → 충분한 이동 */
+            #define PROBE_MIN_MS  50U
+            uint32_t probe_limit;
+            {
+                int32_t tgt = DEPTH_MM_TO_ADC(g_needle_depth_mm);
+                if (tgt < (int32_t)VCA_ADC_HOME) tgt = (int32_t)VCA_ADC_HOME;
+                probe_limit = (uint32_t)(
+                    (uint32_t)(tgt - (int32_t)VCA_ADC_HOME) * PROBE_TIMEOUT_MS
+                    / (uint32_t)(VCA_ADC_MAX_SAFE - VCA_ADC_HOME));
+                if (probe_limit < PROBE_MIN_MS) probe_limit = PROBE_MIN_MS;
+                if (probe_limit > PROBE_TIMEOUT_MS) probe_limit = PROBE_TIMEOUT_MS;
+            }
+            bool probe_done = ((now - s_probe_t0) >= probe_limit);
             if (probe_done) {
                 /* PROBE 끝 → MOVE로 전환
                  * 유부하/무부하 모두 Loop2 duty 직접제어 (Loop1 발진 문제) */
@@ -984,86 +1028,41 @@ void HPSwitchTask(void *argument)
 
         case VCA_MOVE_TO_TARGET: {
             g_state_dbg = 2;
-            /* ADC 하드 리밋(39000)이 안전 범위 보장 → mm 클램핑 불필요 */
-            int32_t target_adc = DEPTH_MM_TO_ADC(g_needle_depth_mm);
-            int32_t err = target_adc - (int32_t)pos;
-            g_vca_err = err;
 
-            /* MOVE 중 ADC 동결 → 그래프에 목표 ADC 표시 (2단계 상승 방지) */
+            /* ── MOVE = HOLD FF duty로 밀기 ──────────────────────────
+             *  HOLD과 동일한 duty 사용 → 모터-스프링 평형점 = 목표위치
+             *  오버슈트 원천 차단: push force = hold force
+             *  800ms 후 HOLD 전환 (VCA가 평형점에 도달할 시간)
+             * ──────────────────────────────────────────────────────── */
+            #define MOVE_SETTLE_MS  800U
+
+            float depth = g_needle_depth_mm;
+            if (depth < 0.0f) depth = 0.0f;
+            float move_duty = HOLD_FF_SLOPE * depth;
+            if (move_duty < 0.10f) move_duty = 0.10f;
+            if (move_duty > HOLD_DUTY_MAX) move_duty = HOLD_DUTY_MAX;
+
+            TLE9201_SetDir(DIR_PUSH);
+            VCA_SetDuty(move_duty);
+            g_motor_active = 1;
+
+            /* 그래프에 목표 ADC 표시 */
             {
-                int32_t ta = target_adc;
+                int32_t ta = DEPTH_MM_TO_ADC(g_needle_depth_mm);
                 if (ta < 0) ta = 0;
                 if (ta > 65535) ta = 65535;
                 g_vca_pos_adc = (uint16_t)ta;
             }
 
-            /* 하드 리밋 */
-            if ((int32_t)pos >= (int32_t)VCA_ADC_MAX_SAFE) {
+            /* 800ms 후 HOLD 전환 */
+            if (s_move_t0 != 0 && (now - s_move_t0) >= MOVE_SETTLE_MS) {
                 Loop1_Stop();
-                VCA_SetDuty(0.0f);
-                s_state   = VCA_HOLD_TARGET;
-                stable_t0 = 0;
-                g_state_dbg = 9;
-                break;
-            }
-
-            /* 목표 도달 → HOLD 전환 (위치 기반) */
-            if (err <= (int32_t)VCA_DB_MOVE) {
-                Loop1_Stop();
-                s_loaded_duty = 0.0f;
-                VCA_SetDuty(0.0f);
                 s_state   = VCA_HOLD_TARGET;
                 stable_t0 = 0;
                 break;
             }
 
-            /* 타이머 기반 HOLD 전환 ─ 목표 깊이에 비례하는 시간
-             *  ADC 동결 중이므로 위치를 모름 → 시간으로 전환
-             *  깊이 비례: 목표가 가까우면 짧게, 멀면 길게 밀기
-             *  move_ms = (target - HOME) / (MAX_SAFE - HOME) × MOVE_TIMEOUT_MS
-             *  최소 100ms 보장 */
-            {
-                int32_t tgt = DEPTH_MM_TO_ADC(g_needle_depth_mm);
-                if (tgt < (int32_t)VCA_ADC_HOME) tgt = (int32_t)VCA_ADC_HOME;
-                uint32_t move_ms = (uint32_t)(
-                    (uint32_t)(tgt - (int32_t)VCA_ADC_HOME) * MOVE_TIMEOUT_MS
-                    / (uint32_t)(VCA_ADC_MAX_SAFE - VCA_ADC_HOME));
-                if (move_ms < 100U) move_ms = 100U;
-
-                if (s_move_t0 != 0 && (now - s_move_t0) >= move_ms) {
-                    Loop1_Stop();
-                    s_loaded_duty = 0.0f;
-                    s_state   = VCA_HOLD_TARGET;
-                    stable_t0 = 0;
-                    break;
-                }
-            }
-
-            if (g_load_detected == 0U) {
-                /* 무부하: 고정 duty 3단계 제동
-                 * err > BRAKE_ZONE : MOVE_DUTY
-                 * err > BRAKE_ZONE2: BRAKE_DUTY
-                 * err > 0          : BRAKE2_DUTY ≈ FF
-                 * err < 0          : DIR_PULL 역제동 */
-                if (err < 0) {
-                    TLE9201_SetDir(DIR_PULL);
-                    VCA_SetDuty(NO_LOAD_BRAKE2_DUTY);
-                } else {
-                    TLE9201_SetDir(DIR_PUSH);
-                    if (err > (int32_t)VCA_BRAKE_ZONE)
-                        VCA_SetDuty(NO_LOAD_MOVE_DUTY);
-                    else if (err > (int32_t)NO_LOAD_BRAKE_ZONE2)
-                        VCA_SetDuty(NO_LOAD_BRAKE_DUTY);
-                    else
-                        VCA_SetDuty(NO_LOAD_BRAKE2_DUTY);
-                }
-            } else {
-                /* 유부하: 고정 duty로 밀기 (원래 로직 복원)
-                 * 오버슈트는 HOLD 진입 후 P 제어기가 처리 */
-                TLE9201_SetDir(DIR_PUSH);
-                VCA_SetDuty(PUSH_DUTY_LOADED);
-            }
-            g_duty_dbg = s_duty_l1;
+            g_duty_dbg = move_duty;
             g_dir_dbg  = 1;
             break;
         }
@@ -1080,10 +1079,7 @@ void HPSwitchTask(void *argument)
 
             /* ── 깊이(mm) → hold duty 변환 ──
              *  기준: 1.5mm에서 0.36 duty → slope ≈ 0.24/mm
-             *  최소 duty 0.05 (마찰 극복), 최대 0.60 */
-            #define HOLD_FF_SLOPE   0.24f
-            #define HOLD_DUTY_MAX   0.60f
-
+             *  최소 duty 0.10 (마찰 극복), 최대 0.60 */
             float depth = g_needle_depth_mm;
             if (depth < 0.0f) depth = 0.0f;
 
