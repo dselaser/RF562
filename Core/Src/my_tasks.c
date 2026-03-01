@@ -78,7 +78,7 @@ volatile int32_t  g_vca_err     = 0;
 volatile uint8_t  g_motor_active = 0;  /* 1=모터 PWM 중 → ADC 동결 */
 
 /* 니들 삽입 깊이 (0.5 ~ 3.5 mm, 런타임 변경 가능) */
-volatile float    g_needle_depth_mm = 3.0f;
+volatile float    g_needle_depth_mm = 1.5f;  /* ← VCA_DEPTH_MM_MAX 와 일치시킬 것 */
 /* PROBE 결과: 0=무부하, 1=유부하(피부 감지) */
 volatile uint8_t  g_load_detected = 0U;
 
@@ -383,7 +383,7 @@ static void Loop1_SetTarget(int32_t i_target_mA)
 #define VCA_ADC_HOME          (3300)
 #define VCA_ADC_PER_MM        (10200)  /* 실측: (39000-3300)/3.5mm */
 #define VCA_DEPTH_MM_MIN      (0.5f)
-#define VCA_DEPTH_MM_MAX      (3.5f)   /* ADC 39000 = 실제 3.5mm */
+#define VCA_DEPTH_MM_MAX      (1.5f)   /* ADC 39000 = 실제 3.5mm */
 #define VCA_ADC_MAX_SAFE      (39000)  /* 40000보다 1000 여유 */
 /* ── 깊이 → ADC 변환 ────────────────────────────────────────────────────
  *  실측: ADC_HOME=3300, ADC 39000 = 실제 3.5mm
@@ -984,7 +984,11 @@ void HPSwitchTask(void *argument)
 
         case VCA_MOVE_TO_TARGET: {
             g_state_dbg = 2;
-            int32_t target_adc = DEPTH_MM_TO_ADC(g_needle_depth_mm);
+            /* 깊이 클램핑 */
+            float depth = g_needle_depth_mm;
+            if (depth < VCA_DEPTH_MM_MIN) depth = VCA_DEPTH_MM_MIN;
+            if (depth > VCA_DEPTH_MM_MAX) depth = VCA_DEPTH_MM_MAX;
+            int32_t target_adc = DEPTH_MM_TO_ADC(depth);
             int32_t err = target_adc - (int32_t)pos;
             g_vca_err = err;
 
@@ -1146,20 +1150,31 @@ void ADS8325_AcqTask(void *argument)
     (void)argument;
     ADS8325_Init(&g_ads8325, &hspi1, GPIOA, GPIO_PIN_4);
 
-    /* ── 필터: 모터 동결 + median(9) ────────────────────────────────
+    /* ── 필터: 모터 동결 + settle + median(9) + wrap 감지 ───────────
      *  모터 동작 중(g_motor_active=1): ADC 업데이트 안 함 (EMI 회피)
-     *  모터 정지 후(g_motor_active=0): median(9) → g_vca_pos_adc 즉시 업데이트
-     *  wrap 감지: smax>=60000 && smin<5000 → 65535 고정
+     *  모터 정지 직후: 4사이클(20ms) 대기 (back-EMF 잔여 노이즈 소멸)
+     *  정상 동작: median(9) → g_vca_pos_adc 즉시 업데이트
+     *  wrap 감지: smax>=60000 && spread>15000 → 65535 고정
      * ─────────────────────────────────────────────────────────────── */
     #define ADC_MEDIAN_N  9
 
-    static uint8_t  s_adc_init = 0;
+    static uint8_t  s_adc_init   = 0;
+    static uint8_t  s_settle_cnt = 0;
 
     for (;;) {
         osDelay(5);
 
-        /* 모터 동작 중 → ADC 읽지 않음 (EMI로 SPI 데이터 오염) */
-        if (g_motor_active) continue;
+        /* 모터 동작 중 → ADC 읽지 않음, settle 카운터 예약 */
+        if (g_motor_active) {
+            s_settle_cnt = 4;   /* 모터 정지 후 20ms 대기 예약 */
+            continue;
+        }
+
+        /* 모터 정지 직후 → back-EMF 잔여 노이즈 대기 */
+        if (s_settle_cnt > 0) {
+            s_settle_cnt--;
+            continue;
+        }
 
         uint16_t raw[ADC_MEDIAN_N];
         ADS8325_ReadN(&g_ads8325, raw, ADC_MEDIAN_N);
@@ -1172,8 +1187,9 @@ void ADS8325_AcqTask(void *argument)
         }
 
         uint16_t val;
-        if (smax >= 60000U && smin < 5000U) {
-            /* wrap 경계 → 65535 */
+        if (smax >= 60000U && (smax - smin) > 15000U) {
+            /* wrap 감지: 일부 샘플은 60000+, 일부는 크게 낮음(~33k)
+             * 센서가 최대점 넘어가는 중 → 65535로 고정 */
             val = 65535U;
         } else {
             /* median of 9 */
