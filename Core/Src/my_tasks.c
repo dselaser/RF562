@@ -383,7 +383,7 @@ static void Loop1_SetTarget(int32_t i_target_mA)
 #define VCA_ADC_HOME          (3300)
 #define VCA_ADC_PER_MM        (10200)  /* 실측: (39000-3300)/3.5mm */
 #define VCA_DEPTH_MM_MIN      (0.5f)
-#define VCA_DEPTH_MM_MAX      (1.5f)   /* ADC 39000 = 실제 3.5mm */
+#define VCA_DEPTH_MM_MAX      (3.5f)   /* ADC 39000 = 실제 3.5mm */
 #define VCA_ADC_MAX_SAFE      (39000)  /* 40000보다 1000 여유 */
 /* ── 깊이 → ADC 변환 ────────────────────────────────────────────────────
  *  실측: ADC_HOME=3300, ADC 39000 = 실제 3.5mm
@@ -984,11 +984,8 @@ void HPSwitchTask(void *argument)
 
         case VCA_MOVE_TO_TARGET: {
             g_state_dbg = 2;
-            /* 깊이 클램핑 */
-            float depth = g_needle_depth_mm;
-            if (depth < VCA_DEPTH_MM_MIN) depth = VCA_DEPTH_MM_MIN;
-            if (depth > VCA_DEPTH_MM_MAX) depth = VCA_DEPTH_MM_MAX;
-            int32_t target_adc = DEPTH_MM_TO_ADC(depth);
+            /* ADC 하드 리밋(39000)이 안전 범위 보장 → mm 클램핑 불필요 */
+            int32_t target_adc = DEPTH_MM_TO_ADC(g_needle_depth_mm);
             int32_t err = target_adc - (int32_t)pos;
             g_vca_err = err;
 
@@ -1012,13 +1009,26 @@ void HPSwitchTask(void *argument)
                 break;
             }
 
-            /* 타이머 기반 HOLD 전환 (ADC 동결 중 위치 모름 → 시간으로 전환) */
-            if (s_move_t0 != 0 && (now - s_move_t0) >= MOVE_TIMEOUT_MS) {
-                Loop1_Stop();
-                s_loaded_duty = 0.0f;
-                s_state   = VCA_HOLD_TARGET;
-                stable_t0 = 0;
-                break;
+            /* 타이머 기반 HOLD 전환 ─ 목표 깊이에 비례하는 시간
+             *  ADC 동결 중이므로 위치를 모름 → 시간으로 전환
+             *  깊이 비례: 목표가 가까우면 짧게, 멀면 길게 밀기
+             *  move_ms = (target - HOME) / (MAX_SAFE - HOME) × MOVE_TIMEOUT_MS
+             *  최소 100ms 보장 */
+            {
+                int32_t tgt = DEPTH_MM_TO_ADC(g_needle_depth_mm);
+                if (tgt < (int32_t)VCA_ADC_HOME) tgt = (int32_t)VCA_ADC_HOME;
+                uint32_t move_ms = (uint32_t)(
+                    (uint32_t)(tgt - (int32_t)VCA_ADC_HOME) * MOVE_TIMEOUT_MS
+                    / (uint32_t)(VCA_ADC_MAX_SAFE - VCA_ADC_HOME));
+                if (move_ms < 100U) move_ms = 100U;
+
+                if (s_move_t0 != 0 && (now - s_move_t0) >= move_ms) {
+                    Loop1_Stop();
+                    s_loaded_duty = 0.0f;
+                    s_state   = VCA_HOLD_TARGET;
+                    stable_t0 = 0;
+                    break;
+                }
             }
 
             if (g_load_detected == 0U) {
@@ -1050,19 +1060,41 @@ void HPSwitchTask(void *argument)
             break;
         }
 
-        /* ══ 2. HOLD: Loop2 단독 duty 직접제어 ══════════════════════════
-         *  Loop1 OFF. 발열 최소화.
-         *  데드밴드 ±VCA_DB_HOLD 안: FF duty만 → 진동 없음
-         *  데드밴드 밖: 소폭 P 보정
+        /* ══ 2. HOLD: 깊이 비례 feedforward, 모터 계속 ON ═══════════════
+         *  EMI 때문에 모터 ON 중 ADC 읽기 불가.
+         *  모터 OFF 하면 스프링이 VCA를 끌어당겨 진동.
+         *  → 해법: ADC 읽기를 포기하고, 깊이에 비례하는 duty만 적용
+         *  duty = HOLD_FF_SLOPE × depth_mm
+         *  스프링 힘 ∝ 변위 → duty ∝ 변위 = 안정적 유지
          * ═══════════════════════════════════════════════════════════════*/
         case VCA_HOLD_TARGET: {
             g_state_dbg = 3;
 
-            /* 모터 동작 중 ADC 동결 → 위치 데이터 무의미
-             * feedforward duty만으로 hold (P 제어기 비활성) */
+            /* ── 깊이(mm) → hold duty 변환 ──
+             *  기준: 1.5mm에서 0.36 duty → slope ≈ 0.24/mm
+             *  최소 duty 0.05 (마찰 극복), 최대 0.60 */
+            #define HOLD_FF_SLOPE   0.24f
+            #define HOLD_DUTY_MAX   0.60f
+
+            float depth = g_needle_depth_mm;
+            if (depth < 0.0f) depth = 0.0f;
+
+            float duty_hold = HOLD_FF_SLOPE * depth;
+            if (duty_hold < 0.05f) duty_hold = 0.05f;
+            if (duty_hold > HOLD_DUTY_MAX) duty_hold = HOLD_DUTY_MAX;
+
             TLE9201_SetDir(DIR_PUSH);
-            VCA_SetDuty(HOLD_DUTY_FF);
-            g_duty_dbg = HOLD_DUTY_FF;
+            VCA_SetDuty(duty_hold);
+            g_motor_active = 1;   /* ADC 동결 유지 — EMI 완전 차단 */
+
+            /* HOLD 중 ADC 읽기 불가 → 그래프에 목표 ADC 표시 */
+            int32_t target_adc = DEPTH_MM_TO_ADC(g_needle_depth_mm);
+            if (target_adc < 0) target_adc = 0;
+            if (target_adc > 65535) target_adc = 65535;
+            g_vca_pos_adc = (uint16_t)target_adc;
+
+            g_vca_err  = 0;  /* feedforward 전용 → err 무의미 */
+            g_duty_dbg = duty_hold;
             g_en_dbg   = 1;
             break;
         }
