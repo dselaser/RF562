@@ -382,8 +382,8 @@ static void Loop1_SetTarget(int32_t i_target_mA)
  * ─────────────────────────────────────────────────────────────────────────*/
 #define VCA_ADC_HOME          (3300)
 #define VCA_ADC_PER_MM        (10200)  /* 실측: (39000-3300)/3.5mm */
-#define VCA_DEPTH_MM_MIN      (0.5f)
-#define VCA_DEPTH_MM_MAX      (3.5f)   /* ADC 39000 = 실제 3.5mm */
+#define VCA_DEPTH_MM_MIN      (1.5f)   /* 선형화 유효 최소 깊이 */
+#define VCA_DEPTH_MM_MAX      (4.0f)   /* 선형화 유효 최대 깊이 */
 #define VCA_ADC_MAX_SAFE      (39000)  /* 40000보다 1000 여유 */
 /* ── 깊이 → ADC 변환 ────────────────────────────────────────────────────
  *  실측: ADC_HOME=3300, ADC 39000 = 실제 3.5mm
@@ -434,11 +434,50 @@ static void Loop1_SetTarget(int32_t i_target_mA)
  *  VCA_DB_HOLD  : 이 범위 안에서 FF duty만 → 진동 없음 (핵심)
  * ═════════════════════════════════════════════════════════════════════════*/
 #define HOLD_DUTY_FF          (0.360f) /* 유부하 실리콘 반발력 극복 */
-#define HOLD_FF_SLOPE         (0.24f)  /* duty/mm — 1.5mm에서 0.36 */
 #define HOLD_DUTY_MAX         (0.60f)  /* HOLD/MOVE 최대 duty */
 #define HOLD_KP               (0.000025f) /* P보정 */
 #define VCA_DB_HOLD           (2000)      /* 데드밴드 좁혀서 빠른 보정 */
 #define VCA_DB_MOVE           (400)
+
+/* ══ 선형화 LUT: 원하는 깊이(mm) → 필요한 duty ═══════════════════════════
+ *  2차 측정 데이터 (선형화 1차 적용 후):
+ *    G100 (duty 0.2026) → 1.65mm
+ *    G150 (duty 0.2079) → 2.00mm
+ *    G200 (duty 0.2132) → 2.33mm
+ *    G250 (duty 0.2203) → 2.52mm
+ *    G300 (duty 0.2293) → 2.90mm
+ *    G350 (duty 0.2382) → 3.28mm
+ *    G400 (duty 0.3516) → 4.00mm
+ *
+ *  역변환: desired_depth_mm → required_duty
+ *  구간별 선형 보간으로 비선형 VCA 특성 보상
+ * ═══════════════════════════════════════════════════════════════════════*/
+#define LIN_LUT_N  8
+static const float lut_depth[LIN_LUT_N] = {
+    0.00f, 1.65f, 2.00f, 2.33f, 2.52f, 2.90f, 3.28f, 4.00f
+};
+static const float lut_duty[LIN_LUT_N] = {
+    0.192f, 0.2026f, 0.2079f, 0.2132f, 0.2203f, 0.2293f, 0.2382f, 0.3516f
+};
+
+static float depth_to_duty(float depth_mm)
+{
+    /* 범위 밖 클램프 */
+    if (depth_mm <= lut_depth[0])
+        return lut_duty[0];
+    if (depth_mm >= lut_depth[LIN_LUT_N - 1])
+        return lut_duty[LIN_LUT_N - 1];
+
+    /* 구간별 선형 보간 */
+    for (int i = 0; i < LIN_LUT_N - 1; i++) {
+        if (depth_mm <= lut_depth[i + 1]) {
+            float t = (depth_mm - lut_depth[i])
+                    / (lut_depth[i + 1] - lut_depth[i]);
+            return lut_duty[i] + t * (lut_duty[i + 1] - lut_duty[i]);
+        }
+    }
+    return lut_duty[LIN_LUT_N - 1];
+}
 #define MOVE_TIMEOUT_MS       (500)   /* MOVE 시간 제한: ADC 동결 중 위치 전환 불가 → 타이머로 HOLD 전환 */
 
 /* ══ 4단계: RETURN ═══════════════════════════════════════════════════════
@@ -769,9 +808,8 @@ void HPSwitchTask(void *argument)
     if (last_in_push) {
         vca_on();
         TLE9201_SetDir(DIR_PUSH);
-        {   /* PROBE duty = min(PROBE_DUTY, HOLD FF duty) */
-            float pd = HOLD_FF_SLOPE * g_needle_depth_mm;
-            if (pd < 0.10f) pd = 0.10f;
+        {   /* PROBE duty = min(PROBE_DUTY, 선형화 duty) */
+            float pd = depth_to_duty(g_needle_depth_mm);
             if (pd > PROBE_DUTY) pd = PROBE_DUTY;
             VCA_SetDuty(pd);
         }
@@ -878,8 +916,7 @@ void HPSwitchTask(void *argument)
                 s_push_i_ma = PUSH_I_NO_LOAD;
                 vca_on();
                 TLE9201_SetDir(DIR_PUSH);
-                {   float pd = HOLD_FF_SLOPE * g_needle_depth_mm;
-                    if (pd < 0.10f) pd = 0.10f;
+                {   float pd = depth_to_duty(g_needle_depth_mm);
                     if (pd > PROBE_DUTY) pd = PROBE_DUTY;
                     VCA_SetDuty(pd);
                 }
@@ -957,13 +994,12 @@ void HPSwitchTask(void *argument)
             g_state_dbg = 1;
             TLE9201_SetDir(DIR_PUSH);
 
-            /* PROBE duty = min(PROBE_DUTY, HOLD FF duty)
-             *  얕은 목표(G10): hold_duty(0.16) < PROBE_DUTY(0.28) → 0.16 사용
-             *  깊은 목표(G30): hold_duty(0.60) > PROBE_DUTY(0.28) → 0.28 사용
+            /* PROBE duty = min(PROBE_DUTY, 선형화 duty)
+             *  얕은 목표: 선형화 duty < PROBE_DUTY → 선형화 duty 사용
+             *  깊은 목표: 선형화 duty > PROBE_DUTY → PROBE_DUTY 사용
              *  → 오버슈트 방지: PROBE가 HOLD보다 강하게 밀지 않음 */
             {
-                float pd = HOLD_FF_SLOPE * g_needle_depth_mm;
-                if (pd < 0.10f) pd = 0.10f;
+                float pd = depth_to_duty(g_needle_depth_mm);
                 if (pd > PROBE_DUTY) pd = PROBE_DUTY;
                 VCA_SetDuty(pd);
             }
@@ -1033,8 +1069,7 @@ void HPSwitchTask(void *argument)
 
             float depth = g_needle_depth_mm;
             if (depth < 0.0f) depth = 0.0f;
-            float move_duty = HOLD_FF_SLOPE * depth;
-            if (move_duty < 0.10f) move_duty = 0.10f;
+            float move_duty = depth_to_duty(depth);
             if (move_duty > HOLD_DUTY_MAX) move_duty = HOLD_DUTY_MAX;
 
             TLE9201_SetDir(DIR_PUSH);
@@ -1066,20 +1101,19 @@ void HPSwitchTask(void *argument)
          *  EMI 때문에 모터 ON 중 ADC 읽기 불가.
          *  모터 OFF 하면 스프링이 VCA를 끌어당겨 진동.
          *  → 해법: ADC 읽기를 포기하고, 깊이에 비례하는 duty만 적용
-         *  duty = HOLD_FF_SLOPE × depth_mm
-         *  스프링 힘 ∝ 변위 → duty ∝ 변위 = 안정적 유지
+         *  duty = depth_to_duty(depth_mm)  — 선형화 LUT 보간
+         *  비선형 VCA 특성을 보상하여 원하는 깊이 정밀 유지
          * ═══════════════════════════════════════════════════════════════*/
         case VCA_HOLD_TARGET: {
             g_state_dbg = 3;
 
-            /* ── 깊이(mm) → hold duty 변환 ──
-             *  기준: 1.5mm에서 0.36 duty → slope ≈ 0.24/mm
-             *  최소 duty 0.10 (마찰 극복), 최대 0.60 */
+            /* ── 깊이(mm) → hold duty 변환 (선형화 LUT) ──
+             *  측정 데이터 기반 구간별 선형 보간
+             *  최대 duty 0.60 */
             float depth = g_needle_depth_mm;
             if (depth < 0.0f) depth = 0.0f;
 
-            float duty_hold = HOLD_FF_SLOPE * depth;
-            if (duty_hold < 0.10f) duty_hold = 0.10f;
+            float duty_hold = depth_to_duty(depth);
             if (duty_hold > HOLD_DUTY_MAX) duty_hold = HOLD_DUTY_MAX;
 
             TLE9201_SetDir(DIR_PUSH);

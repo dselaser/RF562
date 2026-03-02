@@ -583,12 +583,12 @@ static void handle_user_command(const char *line)
             return;
         }
 
-        long gval = strtol(numstr, NULL, 10);  // 예: 15 → 1.5mm
-        if (gval < 0)  gval = 0;
-        if (gval > 35) gval = 35;              // 최대 3.5mm
+        long gval = strtol(numstr, NULL, 10);  // 예: G150 → 1.50mm
+        if (gval < 0)   gval = 0;
+        if (gval > 400) gval = 400;            // 최대 4.00mm
 
-        /* Gxx = x.x mm 깊이 (G15 → 1.5mm, G35 → 3.5mm) */
-        float depth_mm = (float)gval / 10.0f;
+        /* Gxxx = x.xx mm 깊이 (G150 → 1.50mm, G400 → 4.00mm) */
+        float depth_mm = (float)gval / 100.0f;
         g_needle_depth_mm = depth_mm;
 
         // pending도 갱신 (호환용)
@@ -596,7 +596,7 @@ static void handle_user_command(const char *line)
 
         char buf[96];
         snprintf(buf, sizeof(buf),
-                 "\r\nG saved: G=%ld -> depth=%.1fmm\r\n",
+                 "\r\nG saved: G=%ld -> depth=%.2fmm\r\n",
                  gval, (double)depth_mm);
         uart_write_str(buf);
         return;
@@ -610,7 +610,7 @@ static void handle_user_command(const char *line)
         /* RUN: pending depth를 적용 (G 명령이 이미 g_needle_depth_mm 설정) */
         char buf[96];
         snprintf(buf, sizeof(buf),
-                 "\r\nRUN: depth=%.1fmm\r\n",
+                 "\r\nRUN: depth=%.2fmm\r\n",
                  (double)g_needle_depth_mm);
         uart_write_str(buf);
         return;

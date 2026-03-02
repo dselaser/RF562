@@ -22,7 +22,7 @@ void VCA_SetTargetADC(uint16_t adc_target)
     /* ADC → mm 변환: mm = (adc - HOME) / PER_MM */
     float mm = (float)((int32_t)adc_target - STUB_ADC_HOME) / STUB_ADC_PER_MM;
     if (mm < 0.0f) mm = 0.0f;
-    if (mm > 3.5f) mm = 3.5f;
+    if (mm > 4.0f) mm = 4.0f;
     g_needle_depth_mm = mm;
 }
 
