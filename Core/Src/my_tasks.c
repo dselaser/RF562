@@ -1209,13 +1209,14 @@ void HPSwitchTask(void *argument)
 }  /* end HPSwitchTask */
 
 /* ═══════════════════════════════════════════════════════════════════════════
- *  ADS8325 100 KSPS 타이머 구동 ADC
+ *  ADS8325 타이머 구동 ADC
  *
- *  TIM7 (2 kHz ISR) → 카운터 증가만 (~100ns)
- *  ADS8325_AcqTask (2 ms) → 카운터만큼 SPI burst → trimmed mean → IIR
+ *  TIM7 (4 kHz ISR) → 카운터 증가만 (~100ns)
+ *  ADS8325_AcqTask (5 ms) → 카운터만큼 SPI burst → trimmed mean → IIR
  *
- *  SPI1: 2.667 MHz SCLK (소프트웨어 복원, Task에서만 접근)
- *  TIM7: 500 μs 주기 (2 kHz), 2ms에 ~4개 burst, CPU ~5%
+ *  SPI1: 2.667 MHz SCLK (CubeMX prescaler=16, 런타임 변경 금지)
+ *  TIM7: 250 μs 주기 (4 kHz), 5ms에 ~20개 burst → 강력한 잡음 제거
+ *  CPU: 20 × 14μs = 280μs / 5ms ≈ 5.6%
  * ═══════════════════════════════════════════════════════════════════════════*/
 
 /* ── TIM7 ISR: 카운터만 증가 (SPI 접근 금지) ──
@@ -1241,27 +1242,27 @@ void ADS8325_AcqTask(void *argument)
      *  prescaler=16 (2.667MHz) → CubeMX에서 복원 필요
      *  런타임 HAL_SPI_Init/레지스터 수정은 UART 깨짐 부작용 */
 
-    /* TIM7: 2 kHz 타이머 → 2ms마다 ~4개 burst
+    /* TIM7: 4 kHz 타이머 → 5ms마다 ~20개 burst
      *  ISR: 카운터 증가만 (~100ns)
-     *  Task: 2ms 주기, ~4개 burst × 25μs = 100μs → CPU ~5%
-     *  기존(9개/5ms=1.8KSPS) → 개선(4개/2ms=2KSPS, 갱신 500Hz) */
+     *  Task: 5ms 주기, ~20개 burst × 14μs = 280μs → CPU ~5.6%
+     *  이전(9개/5ms, median+IIR0.15) → 개선(20개/5ms, trimmed mean+IIR0.10) */
     extern TIM_HandleTypeDef htim7;
-    __HAL_TIM_SET_AUTORELOAD(&htim7, 31999U); /* 64MHz/(31999+1)=2kHz */
+    __HAL_TIM_SET_AUTORELOAD(&htim7, 15999U); /* 64MHz/(15999+1)=4kHz */
     HAL_TIM_Base_Start_IT(&htim7);
 
     /* ── 처리 파라미터 ── */
-    #define BATCH_MAX     16    /* 한 번에 최대 처리 개수 */
-    #define TRIM_PCT      20    /* 상하 20% 절삭 */
-    #define IIR_ALPHA     (0.25f)
+    #define BATCH_MAX     24    /* 한 번에 최대 처리 개수 (5ms×4kHz=20, 여유+4) */
+    #define TRIM_PCT      25    /* 상하 25% 절삭 → 20개 중 10개만 평균 */
+    #define IIR_ALPHA     (0.10f)  /* 강한 평활: τ≈50ms, 이전 0.15보다 강력 */
     #define SPIKE_TH      (3000)
-    #define SETTLE_BATCHES 4    /* 모터 정지 후 4ms(4배치) 대기 */
+    #define SETTLE_BATCHES 4    /* 모터 정지 후 20ms(4배치×5ms) 대기 */
 
     static uint8_t  s_adc_init   = 0;
     static uint8_t  s_settle_cnt = 0;
     static float    s_iir_acc    = 0.0f;
 
     for (;;) {
-        osDelay(2);  /* 2ms 주기 — TIM7(2kHz)과 맞춤 */
+        osDelay(5);  /* 5ms 주기 — TIM7(4kHz)×5ms=20샘플 축적 */
 
         /* 모터 동작 중 → 카운터 리셋, settle 예약 */
         if (g_motor_active) {
