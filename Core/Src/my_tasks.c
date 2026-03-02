@@ -480,24 +480,27 @@ static float depth_to_duty(float depth_mm)
 }
 #define MOVE_TIMEOUT_MS       (500)   /* MOVE 시간 제한: ADC 동결 중 위치 전환 불가 → 타이머로 HOLD 전환 */
 
-/* ══ 4단계: RETURN ═══════════════════════════════════════════════════════
- *  전략: PULL은 먼 거리에서만 약하게. HOME 근처는 스프링 복원력만
- *        사용하되, PUSH 역제동(능동 브레이크)으로 부드럽게 착륙.
+/* ══ 4단계: RETURN — 2단속 램프 하강 ═══════════════════════════════════
+ *  전략: depth_to_duty() 피드포워드 2단속 램프
+ *        ① FAST: 피부에서 빠르게 니들 추출 (20 mm/s)
+ *        ② SLOW: 홈 근처 부드러운 착륙  (2 mm/s)
+ *        ③ CUSHION: 최종 duty 페이드아웃 (300ms)
  *
- *  ┌── dist > RETURN_COAST_ZONE ──┐  약한 PULL (스프링 보조)
- *  ├── BRAKE_ZONE < dist ≤ COAST ─┤  FREE: duty=0, 스프링만
- *  ├── STOP_POS < dist ≤ BRAKE    ┤  PUSH 역제동 (거리+속도 비례)
- *  └── dist ≤ STOP_POS ──────────┘  PUSH 쿠션 → 0 페이드아웃
+ *             ┌────────┐
+ *     HOLD    │        │
+ *             │        └──────╲          ← ① FAST (20 mm/s)
+ *                               ╲
+ *     HOME ──────────────────────╲────   ← ② SLOW (2 mm/s) + ③ CUSHION
+ *
+ *  예) G400(4mm): FAST 160ms + SLOW 325ms + CUSHION 300ms ≈ 785ms
  * ═══════════════════════════════════════════════════════════════════════*/
-#define RETURN_FAST_DUTY      (0.080f) /* 먼 거리 PULL duty (약하게) */
-#define RETURN_COAST_ZONE     (20000)  /* HOME+20000 이상에서만 PULL */
-#define RETURN_BRAKE_ZONE     (12000)  /* HOME+12000 이내: PUSH 역제동 시작 */
-#define RETURN_BRAKE_VEL_K    (0.0012f) /* 속도 비례 제동 게인 */
-#define RETURN_BRAKE_POS_MAX  (0.20f)  /* 위치 비례 제동 최대 duty */
-#define RETURN_BRAKE_TOTAL_MAX (0.45f) /* 역제동 총 duty 상한 */
-#define RETURN_STOP_POS       ((int32_t)(VCA_ADC_HOME + 800)) /* HOME+800 정지 판정 */
-#define RETURN_CUSHION_DUTY   (0.12f)  /* 착륙 직후 쿠션 초기 duty */
-#define RETURN_CUSHION_MS     (120U)   /* 쿠션 유지 시간(ms) */
+#define RETURN_FAST_SPEED     (20.0f)  /* mm/s: 피부 추출 구간 (급강하) */
+#define RETURN_SLOW_SPEED     (0.1f)   /* mm/s: 홈 접근 구간 (부드럽게) */
+#define RETURN_SLOW_ZONE_MM   (0.8f)   /* 이 depth 이하부터 SLOW 전환 */
+#define RETURN_RAMP_END_MM    (0.15f)  /* 램프 종료 → 쿠션 전환 (mm) */
+#define RETURN_STOP_POS       ((int32_t)(VCA_ADC_HOME + 1200))
+#define RETURN_CUSHION_DUTY   (0.08f)  /* 쿠션 초기 duty */
+#define RETURN_CUSHION_MS     (300U)   /* 쿠션 페이드 시간 */
 
 #define VCA_STABLE_MS         (60U)
 #define VCA_PID_DT_MS         (HP_SAMPLE_MS)
@@ -790,6 +793,11 @@ void HPSwitchTask(void *argument)
     static float    s_vel_lp      = 0.0f;
     static float    s_loaded_duty = 0.0f;  /* 유부하 Loop2 전류제어 duty 누적 */
 
+    /* RETURN 램프 상태변수 (Release Gate에서 리셋) */
+    static float    s_ret_start_mm = 0.0f;  /* 하강 시작 depth (mm) */
+    static uint32_t s_ret_ramp_t0  = 0;     /* 램프/쿠션 시작 시각 */
+    static uint8_t  s_ret_phase    = 0;     /* 0=ramp, 1=cushion, 2=done */
+
     VCA_State_t s_state = last_in_push ? VCA_MOVE_TO_TARGET : VCA_HOME_OFF;
 
     static PID_t s_pid_move = {
@@ -949,6 +957,9 @@ void HPSwitchTask(void *argument)
                 vca_on();  /* 하드 리밋이 DIS=HIGH 했을 수 있으므로 재활성화 */
                 PID_Reset(&s_pid_move);
                 PID_Reset(&s_pid_hold);
+                s_ret_phase   = 0;      /* RETURN 램프 리셋 */
+                s_ret_ramp_t0 = 0;
+                s_ret_start_mm = 0.0f;
                 s_state = VCA_RETURN_HOME;
             }
             /* HOME 착륙 완료(RETURN 상태에서만) 또는 타임아웃 1.5s */
@@ -964,7 +975,7 @@ void HPSwitchTask(void *argument)
             }
             bool home_reached = (s_home_arrive_t != 0) &&
                                 ((now - s_home_arrive_t) >= RETURN_CUSHION_MS);
-            bool timeout = ((now - release_t0) >= 1500U);
+            bool timeout = ((now - release_t0) >= 3000U);
             if (home_reached || timeout) {
                 VCA_SetDuty(0.0f);
                 vca_off();
@@ -1133,67 +1144,88 @@ void HPSwitchTask(void *argument)
             break;
         }
 
-        /* ══ 3. RETURN: 스프링 복귀 + PUSH 역제동 부드러운 착륙 ══════════
-         *  핵심: HOME 근처에서 PULL 하지 않는다!
-         *  - 먼 거리: 약한 PULL로 스프링 보조
-         *  - 중간: duty=0, 스프링 복원력만으로 복귀 (coast)
-         *  - HOME 가까이: PUSH 역제동 (거리+속도 비례)
-         *  - 정지 후: 쿠션 duty를 서서히 줄여 충돌 방지
+        /* ══ 3. RETURN: 2단속 램프 제어 하강 ═══════════════════════════════
+         *  ① FAST (20mm/s): 피부에서 빠르게 추출 — depth_to_duty() 급감소
+         *  ② SLOW (2mm/s) : 홈 근처 부드러운 접근 — depth_to_duty() 완만감소
+         *  ③ CUSHION      : 최종 duty 페이드아웃 300ms
+         *
+         *  2단속 전환점: SLOW_ZONE_MM (0.8mm)
+         *  FAST→SLOW 전환 시 duty가 연속이므로 충격 없음
          * ═══════════════════════════════════════════════════════════════*/
         case VCA_RETURN_HOME: {
             g_state_dbg = 4;
             if (s_l1_enable) Loop1_Stop();
 
-            int32_t dist_to_home = (int32_t)pos - (int32_t)VCA_ADC_HOME;
-            float vel = s_vel_lp;  /* 음수 = HOME 방향 하강 */
+            float vel = s_vel_lp;
 
-            if ((int32_t)pos <= (int32_t)RETURN_STOP_POS) {
-                /* ── 착륙: 쿠션 PUSH로 잔여 에너지 흡수 ────────────
-                 * 쿠션 duty를 시간에 따라 선형 감소 → 부드럽게 0 */
-                static uint32_t s_cushion_t0 = 0;
-                if (s_cushion_t0 == 0) s_cushion_t0 = now;
+            /* ── Phase 0: 2단속 램프 하강 ── */
+            if (s_ret_phase == 0) {
+                /* 첫 진입: 현재 위치 기록 */
+                if (s_ret_ramp_t0 == 0) {
+                    int32_t dist = (int32_t)pos - (int32_t)VCA_ADC_HOME;
+                    s_ret_start_mm = (float)dist / (float)VCA_ADC_PER_MM;
+                    if (s_ret_start_mm < 0.0f) s_ret_start_mm = 0.0f;
+                    s_ret_ramp_t0 = now;
+                    if (s_ret_ramp_t0 == 0) s_ret_ramp_t0 = 1; /* 0 방지 */
+                }
 
-                uint32_t elapsed = now - s_cushion_t0;
+                float elapsed_s = (float)(now - s_ret_ramp_t0) / 1000.0f;
+
+                /* ── 2단속 ramp_mm 계산 ── */
+                float ramp_mm;
+                if (s_ret_start_mm > RETURN_SLOW_ZONE_MM) {
+                    /* 시작점이 SLOW_ZONE 위: FAST→SLOW 2단속 */
+                    float fast_dist = s_ret_start_mm - RETURN_SLOW_ZONE_MM;
+                    float fast_time = fast_dist / RETURN_FAST_SPEED;
+
+                    if (elapsed_s < fast_time) {
+                        /* ① FAST 구간: 피부에서 빠르게 빠짐 */
+                        ramp_mm = s_ret_start_mm - RETURN_FAST_SPEED * elapsed_s;
+                    } else {
+                        /* ② SLOW 구간: 홈 근처 부드럽게 접근 */
+                        float slow_elapsed = elapsed_s - fast_time;
+                        ramp_mm = RETURN_SLOW_ZONE_MM - RETURN_SLOW_SPEED * slow_elapsed;
+                    }
+                } else {
+                    /* 시작점이 이미 SLOW_ZONE 이내: SLOW만 */
+                    ramp_mm = s_ret_start_mm - RETURN_SLOW_SPEED * elapsed_s;
+                }
+
+                if (ramp_mm > RETURN_RAMP_END_MM) {
+                    /* feedforward: 램프 위치의 hold duty 적용
+                     * → 모터가 스프링을 거스르며 제어 하강 */
+                    float duty = depth_to_duty(ramp_mm);
+                    TLE9201_SetDir(DIR_PUSH);
+                    VCA_SetDuty(duty);
+                } else {
+                    /* 램프 완료 (0.15mm 도달) → 쿠션 전환 */
+                    s_ret_phase = 1;
+                    s_ret_ramp_t0 = now;  /* 쿠션 시작 시각으로 재사용 */
+                }
+            }
+
+            /* ── Phase 1: 최종 쿠션 착륙 ── */
+            if (s_ret_phase == 1) {
+                uint32_t elapsed = now - s_ret_ramp_t0;
                 if (elapsed < RETURN_CUSHION_MS) {
-                    /* 시간 비례 감소 + 속도 비례 보조 */
-                    float time_fade = 1.0f - (float)elapsed / (float)RETURN_CUSHION_MS;
-                    float cushion = RETURN_CUSHION_DUTY * time_fade;
-                    /* 아직 하강 중이면 속도 비례 보조 추가 */
-                    if (vel < -1.0f) cushion += (-vel * 0.0010f);
-                    if (cushion > 0.35f) cushion = 0.35f;
+                    float fade = 1.0f - (float)elapsed / (float)RETURN_CUSHION_MS;
+                    float cushion = RETURN_CUSHION_DUTY * fade;
+                    if (vel < -1.0f) cushion += (-vel * 0.0006f);
+                    if (cushion > 0.20f) cushion = 0.20f;
                     if (cushion < 0.0f)  cushion = 0.0f;
                     TLE9201_SetDir(DIR_PUSH);
                     VCA_SetDuty(cushion);
                 } else {
                     VCA_SetDuty(0.0f);
-                    s_cushion_t0 = 0;
+                    s_ret_phase = 2;
                 }
-            } else if (dist_to_home <= (int32_t)RETURN_BRAKE_ZONE) {
-                /* ── PUSH 역제동 구간: 거리+속도 비례 ──────────────
-                 * 가까울수록 강하게, 빠를수록 강하게 제동
-                 * → HOME 도달 시 거의 속도 0 */
-                /* 위치 비례: dist=0에서 최대, dist=BRAKE_ZONE에서 0 */
-                float pos_ratio = 1.0f - (float)dist_to_home / (float)RETURN_BRAKE_ZONE;
-                float pos_brake = pos_ratio * pos_ratio * RETURN_BRAKE_POS_MAX;
+            }
 
-                /* 속도 비례: 하강 속도가 클수록 강한 제동 */
-                float vel_brake = (vel < 0.0f) ? (-vel * RETURN_BRAKE_VEL_K) : 0.0f;
-
-                float brake = pos_brake + vel_brake;
-                if (brake > RETURN_BRAKE_TOTAL_MAX) brake = RETURN_BRAKE_TOTAL_MAX;
-                if (brake < 0.02f) brake = 0.02f;  /* 최소 제동력 */
-
-                TLE9201_SetDir(DIR_PUSH);
-                VCA_SetDuty(brake);
-            } else if (dist_to_home > (int32_t)RETURN_COAST_ZONE) {
-                /* ── 먼 거리: 약한 PULL (스프링 보조) ── */
-                TLE9201_SetDir(DIR_PULL);
-                VCA_SetDuty(RETURN_FAST_DUTY);
-            } else {
-                /* ── Coast 구간: duty=0, 스프링만으로 복귀 ──
-                 * PULL 하지 않아야 HOME 가까이에서 속도가 낮음 */
+            /* ── Phase 2: 완료 — duty 0 유지 (Release Gate가 OFF 처리) ── */
+            if (s_ret_phase == 2) {
                 VCA_SetDuty(0.0f);
             }
+
             break;
         }
 
