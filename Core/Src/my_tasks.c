@@ -1224,8 +1224,16 @@ void ADS8325_AcqTask(void *argument)
      * ─────────────────────────────────────────────────────────────── */
     #define ADC_MEDIAN_N  9
 
+    /* ── IIR 저역통과 필터 설정 ──
+     *  alpha = 0.15 : 새 값 15%, 이전 값 85%
+     *  시정수 ≈ 5ms / 0.15 ≈ 33ms (약 6~7 사이클 후 안정)
+     *  스파이크 제거: median과 IIR의 차이가 SPIKE_TH 이상이면 무시 */
+    #define IIR_ALPHA     (0.15f)
+    #define SPIKE_TH      (3000)  /* 이 이상 차이나는 값은 스파이크로 판단 */
+
     static uint8_t  s_adc_init   = 0;
     static uint8_t  s_settle_cnt = 0;
+    static float    s_iir_acc    = 0.0f;  /* IIR 누적값 */
 
     for (;;) {
         osDelay(5);
@@ -1252,11 +1260,10 @@ void ADS8325_AcqTask(void *argument)
             if (raw[i] > smax) smax = raw[i];
         }
 
-        uint16_t val;
+        uint16_t median_val;
         if (smax >= 60000U && (smax - smin) > 15000U) {
-            /* wrap 감지: 일부 샘플은 60000+, 일부는 크게 낮음(~33k)
-             * 센서가 최대점 넘어가는 중 → 65535로 고정 */
-            val = 65535U;
+            /* wrap 감지: 센서가 최대점 넘어가는 중 → 65535 고정 */
+            median_val = 65535U;
         } else {
             /* median of 9 */
             uint16_t s[ADC_MEDIAN_N];
@@ -1264,11 +1271,35 @@ void ADS8325_AcqTask(void *argument)
             for (int i = 0; i < ADC_MEDIAN_N - 1; i++)
                 for (int j = i + 1; j < ADC_MEDIAN_N; j++)
                     if (s[j] < s[i]) { uint16_t t = s[i]; s[i] = s[j]; s[j] = t; }
-            val = s[ADC_MEDIAN_N / 2];
+            median_val = s[ADC_MEDIAN_N / 2];
         }
 
-        if (!s_adc_init) s_adc_init = 1;
-        g_vca_pos_adc = val;
+        g_vca_pos_raw = median_val;  /* 디버그: 필터 전 median 값 */
+
+        /* ── IIR 저역통과 + 스파이크 제거 ── */
+        if (!s_adc_init) {
+            /* 첫 번째 값: IIR 초기화 */
+            s_iir_acc = (float)median_val;
+            s_adc_init = 1;
+        } else {
+            /* 스파이크 판별: median이 IIR과 너무 다르면 무시 */
+            float diff = (float)median_val - s_iir_acc;
+            if (diff < 0.0f) diff = -diff;
+
+            if (median_val != 65535U && diff > (float)SPIKE_TH) {
+                /* 스파이크 → IIR 유지 (새 값 반영 안 함) */
+            } else {
+                /* 정상 값 → IIR 필터 적용 */
+                s_iir_acc = s_iir_acc * (1.0f - IIR_ALPHA)
+                          + (float)median_val * IIR_ALPHA;
+            }
+        }
+
+        /* IIR 결과를 uint16_t로 변환 */
+        float out = s_iir_acc;
+        if (out < 0.0f) out = 0.0f;
+        if (out > 65535.0f) out = 65535.0f;
+        g_vca_pos_adc = (uint16_t)(out + 0.5f);
     }
 }
 
