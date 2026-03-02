@@ -746,6 +746,7 @@ void HPSwitchTask(void *argument)
     static int32_t  s_push_i_ma = 0;  /* PROBE 결과로 결정된 PUSH 전류 */
     static uint32_t s_probe_t0  = 0;  /* PROBE 타임아웃 기준 */
     static uint32_t s_move_t0   = 0;  /* MOVE 타임아웃 기준 */
+    static uint16_t s_adc_at_home = 0; /* PROBE 진입 직전 실제 home ADC */
     static int32_t  s_pos_prev    = 0;
     static float    s_vel_lp      = 0.0f;
     static float    s_loaded_duty = 0.0f;  /* 유부하 Loop2 전류제어 duty 누적 */
@@ -776,6 +777,7 @@ void HPSwitchTask(void *argument)
         }
         s_push_i_ma = PUSH_I_NO_LOAD;
         s_probe_t0  = osKernelGetTickCount();
+        s_adc_at_home = g_vca_pos_adc;  /* 모터 시작 전 실제 home ADC 캡처 */
         g_motor_active = 1;  /* PROBE 시작 → ADC 동결 (EMI 방지) */
         s_state = VCA_PROBE_LOAD;
     } else {
@@ -882,6 +884,7 @@ void HPSwitchTask(void *argument)
                     VCA_SetDuty(pd);
                 }
                 s_probe_t0 = now;
+                s_adc_at_home = g_vca_pos_adc;  /* home ADC 캡처 */
                 g_motor_active = 1;  /* PROBE 재진입 → ADC 동결 */
                 s_state    = VCA_PROBE_LOAD;
                 s_release_block_until = now + RELEASE_GRACE_MS;
@@ -966,14 +969,6 @@ void HPSwitchTask(void *argument)
             }
             g_motor_active = 1;  /* PROBE 중 ADC 동결 유지 */
 
-            /* PROBE 중 그래프에 목표 ADC 표시 */
-            {
-                int32_t ta = DEPTH_MM_TO_ADC(g_needle_depth_mm);
-                if (ta < 0) ta = 0;
-                if (ta > 65535) ta = 65535;
-                g_vca_pos_adc = (uint16_t)ta;
-            }
-
             /* 전류 측정으로 부하 판별 (전류 ADC는 EMI 영향 적음) */
             int32_t i_now = g_i_meas_mA;
             if (i_now > (int32_t)PROBE_CURRENT_TH) {
@@ -1046,12 +1041,12 @@ void HPSwitchTask(void *argument)
             VCA_SetDuty(move_duty);
             g_motor_active = 1;
 
-            /* 그래프에 목표 ADC 표시 */
+            /* 그래프: 실측 home + depth*PER_MM = 추정 위치 표시 */
             {
-                int32_t ta = DEPTH_MM_TO_ADC(g_needle_depth_mm);
-                if (ta < 0) ta = 0;
-                if (ta > 65535) ta = 65535;
-                g_vca_pos_adc = (uint16_t)ta;
+                int32_t est = (int32_t)s_adc_at_home
+                            + (int32_t)(depth * (float)VCA_ADC_PER_MM);
+                if (est > 65535) est = 65535;
+                g_vca_pos_adc = (uint16_t)est;
             }
 
             /* 800ms 후 HOLD 전환 */
@@ -1091,12 +1086,13 @@ void HPSwitchTask(void *argument)
             VCA_SetDuty(duty_hold);
             g_motor_active = 1;   /* ADC 동결 유지 — EMI 완전 차단 */
 
-            /* HOLD 중 ADC 읽기 불가 → 그래프에 목표 ADC 표시 */
-            int32_t target_adc = DEPTH_MM_TO_ADC(g_needle_depth_mm);
-            if (target_adc < 0) target_adc = 0;
-            if (target_adc > 65535) target_adc = 65535;
-            g_vca_pos_adc = (uint16_t)target_adc;
-
+            /* 그래프: 실측 home + depth*PER_MM = 추정 위치 표시 */
+            {
+                int32_t est = (int32_t)s_adc_at_home
+                            + (int32_t)(depth * (float)VCA_ADC_PER_MM);
+                if (est > 65535) est = 65535;
+                g_vca_pos_adc = (uint16_t)est;
+            }
             g_vca_err  = 0;  /* feedforward 전용 → err 무의미 */
             g_duty_dbg = duty_hold;
             g_en_dbg   = 1;

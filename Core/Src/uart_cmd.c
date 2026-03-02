@@ -17,6 +17,7 @@ extern void     VCA_PID_SetGains(float kp, float ki, float kd);
 extern void     VCA_PID_GetGains(float *kp, float *ki, float *kd);
 extern void     VCA_SetTargetADC(uint16_t adc_target);
 extern uint16_t VCA_GetTargetADC(void);
+extern volatile float g_needle_depth_mm;
 extern osThreadId_t ads8325TaskHandle;
 
 // 외부 UART 핸들 (명령 포트는 UART1)
@@ -582,22 +583,21 @@ static void handle_user_command(const char *line)
             return;
         }
 
-        long gval = strtol(numstr, NULL, 10);  // 예: 35
+        long gval = strtol(numstr, NULL, 10);  // 예: 15 → 1.5mm
         if (gval < 0)  gval = 0;
-        if (gval > 65) gval = 65;              // ADC 0~65535 가드
+        if (gval > 35) gval = 35;              // 최대 3.5mm
 
-        uint16_t adc = (uint16_t)(gval * 1000L);
+        /* Gxx = x.x mm 깊이 (G15 → 1.5mm, G35 → 3.5mm) */
+        float depth_mm = (float)gval / 10.0f;
+        g_needle_depth_mm = depth_mm;
 
-        // pending 값 갱신
-        s_vca_pending_target_adc = adc;
-
-        // 실제 PID 타겟에도 바로 적용
-        VCA_SetTargetADC(adc);
+        // pending도 갱신 (호환용)
+        s_vca_pending_target_adc = (uint16_t)(3300 + (long)(depth_mm * 10200.0f));
 
         char buf[96];
         snprintf(buf, sizeof(buf),
-                 "\r\nG saved: G=%ld -> pending_adc=%u\r\n",
-                 gval, (unsigned)adc);
+                 "\r\nG saved: G=%ld -> depth=%.1fmm\r\n",
+                 gval, (double)depth_mm);
         uart_write_str(buf);
         return;
     }
@@ -607,14 +607,11 @@ static void handle_user_command(const char *line)
     if ((cmd == 'R' || cmd == 'r') &&
         (line[1] == 0 || (line[1]=='U' || line[1]=='u')))
     {
-        uint16_t adc = s_vca_pending_target_adc;
-
-        VCA_SetTargetADC(adc);   // 여기서부터 PID 타겟으로 사용 시작
-
+        /* RUN: pending depth를 적용 (G 명령이 이미 g_needle_depth_mm 설정) */
         char buf[96];
         snprintf(buf, sizeof(buf),
-                 "\r\nRUN: target_adc=%u\r\n",
-                 (unsigned)adc);
+                 "\r\nRUN: depth=%.1fmm\r\n",
+                 (double)g_needle_depth_mm);
         uart_write_str(buf);
         return;
     }
