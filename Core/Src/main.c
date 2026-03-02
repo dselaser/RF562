@@ -118,6 +118,7 @@ int main(void)
   MX_ADC2_Init();
   MX_DAC1_Init();
   MX_TIM6_Init();
+  MX_TIM7_Init();
   /* USER CODE BEGIN 2 */
   HAL_TIM_Base_Start_IT(&htim6);   // Loop-1 시작
   /* USER CODE END 2 */
@@ -201,9 +202,15 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+void ADS8325_TIM7_ISR_Handler(void);   /* my_tasks.c */
+
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
     if (htim->Instance == TIM6) {
     	Loop1_TIM6_ISR_Handler();
+    	return;
+    }
+    if (htim->Instance == TIM7) {
+    	ADS8325_TIM7_ISR_Handler();
     	return;
     }
 }

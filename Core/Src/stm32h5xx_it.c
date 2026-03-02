@@ -58,6 +58,7 @@
 
 /* External variables --------------------------------------------------------*/
 extern TIM_HandleTypeDef htim6;
+extern TIM_HandleTypeDef htim7;
 extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart2;
 /* USER CODE BEGIN EV */
@@ -174,6 +175,25 @@ void TIM6_IRQHandler(void)
   /* USER CODE BEGIN TIM6_IRQn 1 */
 
   /* USER CODE END TIM6_IRQn 1 */
+}
+
+/**
+  * @brief This function handles TIM7 global interrupt.
+  */
+void TIM7_IRQHandler(void)
+{
+  /* USER CODE BEGIN TIM7_IRQn 0 */
+  /* HAL_TIM_IRQHandler 우회: 직접 플래그 클리어 + 핸들러 호출
+   *  HAL 오버헤드 ~2μs 절약 (100kHz ISR에서 치명적) */
+  TIM7->SR = ~TIM_SR_UIF;
+  extern void ADS8325_TIM7_ISR_Handler(void);
+  ADS8325_TIM7_ISR_Handler();
+  return;
+  /* USER CODE END TIM7_IRQn 0 */
+  HAL_TIM_IRQHandler(&htim7);
+  /* USER CODE BEGIN TIM7_IRQn 1 */
+
+  /* USER CODE END TIM7_IRQn 1 */
 }
 
 /**

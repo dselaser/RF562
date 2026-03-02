@@ -1209,93 +1209,139 @@ void HPSwitchTask(void *argument)
 }  /* end HPSwitchTask */
 
 /* ═══════════════════════════════════════════════════════════════════════════
- *  ADS8325_AcqTask  (위치 ADC 전담)
+ *  ADS8325 100 KSPS 타이머 구동 ADC
+ *
+ *  TIM7 (2 kHz ISR) → 카운터 증가만 (~100ns)
+ *  ADS8325_AcqTask (2 ms) → 카운터만큼 SPI burst → trimmed mean → IIR
+ *
+ *  SPI1: 2.667 MHz SCLK (소프트웨어 복원, Task에서만 접근)
+ *  TIM7: 500 μs 주기 (2 kHz), 2ms에 ~4개 burst, CPU ~5%
  * ═══════════════════════════════════════════════════════════════════════════*/
+
+/* ── TIM7 ISR: 카운터만 증가 (SPI 접근 금지) ──
+ *  HAL SPI는 내부 Lock+timeout → ISR에서 데드락 위험
+ *  ISR: ~100ns (카운터 증가만)
+ *  Task: 카운터만큼 SPI burst 읽기 → 안전 */
+static volatile uint16_t s_adc_req = 0;  /* ISR이 증가, Task가 소비 */
+
+void ADS8325_TIM7_ISR_Handler(void)
+{
+    if (!g_motor_active) {
+        s_adc_req++;
+    }
+}
+
+/* ── ADC Task: TIM7 카운터 기반 burst 읽기 + 필터 ── */
 void ADS8325_AcqTask(void *argument)
 {
     (void)argument;
     ADS8325_Init(&g_ads8325, &hspi1, GPIOA, GPIO_PIN_4);
 
-    /* ── 필터: 모터 동결 + settle + median(9) + wrap 감지 ───────────
-     *  모터 동작 중(g_motor_active=1): ADC 업데이트 안 함 (EMI 회피)
-     *  모터 정지 직후: 4사이클(20ms) 대기 (back-EMF 잔여 노이즈 소멸)
-     *  정상 동작: median(9) → g_vca_pos_adc 즉시 업데이트
-     *  wrap 감지: smax>=60000 && spread>15000 → 65535 고정
-     * ─────────────────────────────────────────────────────────────── */
-    #define ADC_MEDIAN_N  9
+    /* ⚠ SPI1 속도는 CubeMX에서 설정 (런타임 변경 금지)
+     *  prescaler=16 (2.667MHz) → CubeMX에서 복원 필요
+     *  런타임 HAL_SPI_Init/레지스터 수정은 UART 깨짐 부작용 */
 
-    /* ── IIR 저역통과 필터 설정 ──
-     *  alpha = 0.15 : 새 값 15%, 이전 값 85%
-     *  시정수 ≈ 5ms / 0.15 ≈ 33ms (약 6~7 사이클 후 안정)
-     *  스파이크 제거: median과 IIR의 차이가 SPIKE_TH 이상이면 무시 */
-    #define IIR_ALPHA     (0.15f)
-    #define SPIKE_TH      (3000)  /* 이 이상 차이나는 값은 스파이크로 판단 */
+    /* TIM7: 2 kHz 타이머 → 2ms마다 ~4개 burst
+     *  ISR: 카운터 증가만 (~100ns)
+     *  Task: 2ms 주기, ~4개 burst × 25μs = 100μs → CPU ~5%
+     *  기존(9개/5ms=1.8KSPS) → 개선(4개/2ms=2KSPS, 갱신 500Hz) */
+    extern TIM_HandleTypeDef htim7;
+    __HAL_TIM_SET_AUTORELOAD(&htim7, 31999U); /* 64MHz/(31999+1)=2kHz */
+    HAL_TIM_Base_Start_IT(&htim7);
+
+    /* ── 처리 파라미터 ── */
+    #define BATCH_MAX     16    /* 한 번에 최대 처리 개수 */
+    #define TRIM_PCT      20    /* 상하 20% 절삭 */
+    #define IIR_ALPHA     (0.25f)
+    #define SPIKE_TH      (3000)
+    #define SETTLE_BATCHES 4    /* 모터 정지 후 4ms(4배치) 대기 */
 
     static uint8_t  s_adc_init   = 0;
     static uint8_t  s_settle_cnt = 0;
-    static float    s_iir_acc    = 0.0f;  /* IIR 누적값 */
+    static float    s_iir_acc    = 0.0f;
 
     for (;;) {
-        osDelay(5);
+        osDelay(2);  /* 2ms 주기 — TIM7(2kHz)과 맞춤 */
 
-        /* 모터 동작 중 → ADC 읽지 않음, settle 카운터 예약 */
+        /* 모터 동작 중 → 카운터 리셋, settle 예약 */
         if (g_motor_active) {
-            s_settle_cnt = 4;   /* 모터 정지 후 20ms 대기 예약 */
+            s_adc_req = 0;
+            s_settle_cnt = SETTLE_BATCHES;
             continue;
         }
 
-        /* 모터 정지 직후 → back-EMF 잔여 노이즈 대기 */
+        /* 모터 정지 직후 → back-EMF 대기 */
         if (s_settle_cnt > 0) {
+            s_adc_req = 0;
             s_settle_cnt--;
             continue;
         }
 
-        uint16_t raw[ADC_MEDIAN_N];
-        ADS8325_ReadN(&g_ads8325, raw, ADC_MEDIAN_N);
+        /* ── TIM7 카운터에서 읽을 개수 결정 ── */
+        uint16_t n_req = s_adc_req;
+        s_adc_req = 0;
+        if (n_req == 0) continue;
+        if (n_req > BATCH_MAX) n_req = BATCH_MAX;
 
-        /* min/max (wrap 감지용) */
-        uint16_t smin = 0xFFFF, smax = 0;
-        for (int i = 0; i < ADC_MEDIAN_N; i++) {
-            if (raw[i] < smin) smin = raw[i];
-            if (raw[i] > smax) smax = raw[i];
+        /* ── SPI burst 읽기 (Task 컨텍스트 — 안전) ── */
+        uint16_t buf[BATCH_MAX];
+        for (uint16_t i = 0; i < n_req; i++) {
+            buf[i] = ADS8325_Read(&g_ads8325);
         }
 
-        uint16_t median_val;
+        /* ── 정렬 (insertion sort, N≤128) ── */
+        uint16_t avail = n_req;
+        for (int i = 1; i < (int)avail; i++) {
+            uint16_t key = buf[i];
+            int j = i - 1;
+            while (j >= 0 && buf[j] > key) {
+                buf[j + 1] = buf[j];
+                j--;
+            }
+            buf[j + 1] = key;
+        }
+
+        /* ── wrap 감지 ── */
+        uint16_t smin = buf[0];
+        uint16_t smax = buf[avail - 1];
         if (smax >= 60000U && (smax - smin) > 15000U) {
-            /* wrap 감지: 센서가 최대점 넘어가는 중 → 65535 고정 */
-            median_val = 65535U;
-        } else {
-            /* median of 9 */
-            uint16_t s[ADC_MEDIAN_N];
-            for (int i = 0; i < ADC_MEDIAN_N; i++) s[i] = raw[i];
-            for (int i = 0; i < ADC_MEDIAN_N - 1; i++)
-                for (int j = i + 1; j < ADC_MEDIAN_N; j++)
-                    if (s[j] < s[i]) { uint16_t t = s[i]; s[i] = s[j]; s[j] = t; }
-            median_val = s[ADC_MEDIAN_N / 2];
+            g_vca_pos_raw = 65535U;
+            if (s_adc_init) {
+                s_iir_acc = 65535.0f;
+                g_vca_pos_adc = 65535U;
+            }
+            continue;
         }
 
-        g_vca_pos_raw = median_val;  /* 디버그: 필터 전 median 값 */
+        /* ── trimmed mean: 상하 TRIM_PCT% 절삭 ── */
+        uint16_t trim_n = (uint16_t)((uint32_t)avail * TRIM_PCT / 100U);
+        uint16_t lo = trim_n;
+        uint16_t hi = avail - trim_n;
+        if (hi <= lo) { lo = 0; hi = avail; }  /* 안전장치 */
+
+        uint32_t sum = 0;
+        for (uint16_t i = lo; i < hi; i++) sum += buf[i];
+        uint16_t trimmed = (uint16_t)(sum / (hi - lo));
+
+        g_vca_pos_raw = trimmed;  /* 디버그: 필터 전 값 */
 
         /* ── IIR 저역통과 + 스파이크 제거 ── */
         if (!s_adc_init) {
-            /* 첫 번째 값: IIR 초기화 */
-            s_iir_acc = (float)median_val;
+            s_iir_acc = (float)trimmed;
             s_adc_init = 1;
         } else {
-            /* 스파이크 판별: median이 IIR과 너무 다르면 무시 */
-            float diff = (float)median_val - s_iir_acc;
+            float diff = (float)trimmed - s_iir_acc;
             if (diff < 0.0f) diff = -diff;
 
-            if (median_val != 65535U && diff > (float)SPIKE_TH) {
-                /* 스파이크 → IIR 유지 (새 값 반영 안 함) */
+            if (diff > (float)SPIKE_TH) {
+                /* 스파이크 → IIR 유지 */
             } else {
-                /* 정상 값 → IIR 필터 적용 */
                 s_iir_acc = s_iir_acc * (1.0f - IIR_ALPHA)
-                          + (float)median_val * IIR_ALPHA;
+                          + (float)trimmed * IIR_ALPHA;
             }
         }
 
-        /* IIR 결과를 uint16_t로 변환 */
+        /* IIR → uint16_t */
         float out = s_iir_acc;
         if (out < 0.0f) out = 0.0f;
         if (out > 65535.0f) out = 65535.0f;
