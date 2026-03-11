@@ -51,39 +51,39 @@ void MX_GPIO_Init(void)
   __HAL_RCC_GPIOD_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOC, ALIVE_Pin|SPI2_CS_Pin|SHUTDOWN_Pin|VCA_DIS_Pin
+  HAL_GPIO_WritePin(GPIOC, ALIVE_Pin|LCD_CS_Pin|SHUTDOWN_Pin|VCA_DIS_Pin
                           |VCA_DIR_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, SPI1_CS_Pin|HP_WS2812_Pin|LCD_BL_Pin|LCD_RST_Pin
-                          |LCD_DS_Pin|SPI3_CS_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, SPI1_CS_Pin|HP_WS2812_Pin|LCD_RST_Pin|LCD_DC_Pin
+                          |SPI3_CS_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, LED_PIN_ON_Pin|I2C1_TP_RST_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, LED_PIN_ON_Pin|TP_RST_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(SPI6_CS_GPIO_Port, SPI6_CS_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : ALIVE_Pin SPI2_CS_Pin SHUTDOWN_Pin VCA_DIS_Pin
+  /*Configure GPIO pins : ALIVE_Pin LCD_CS_Pin SHUTDOWN_Pin VCA_DIS_Pin
                            VCA_DIR_Pin */
-  GPIO_InitStruct.Pin = ALIVE_Pin|SPI2_CS_Pin|SHUTDOWN_Pin|VCA_DIS_Pin
+  GPIO_InitStruct.Pin = ALIVE_Pin|LCD_CS_Pin|SHUTDOWN_Pin|VCA_DIS_Pin
                           |VCA_DIR_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : SPI1_CS_Pin HP_WS2812_Pin LCD_BL_Pin LCD_RST_Pin
-                           LCD_DS_Pin SPI3_CS_Pin */
-  GPIO_InitStruct.Pin = SPI1_CS_Pin|HP_WS2812_Pin|LCD_BL_Pin|LCD_RST_Pin
-                          |LCD_DS_Pin|SPI3_CS_Pin;
+  /*Configure GPIO pins : SPI1_CS_Pin HP_WS2812_Pin LCD_RST_Pin LCD_DC_Pin
+                           SPI3_CS_Pin */
+  GPIO_InitStruct.Pin = SPI1_CS_Pin|HP_WS2812_Pin|LCD_RST_Pin|LCD_DC_Pin
+                          |SPI3_CS_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : LED_PIN_ON_Pin I2C1_TP_RST_Pin */
-  GPIO_InitStruct.Pin = LED_PIN_ON_Pin|I2C1_TP_RST_Pin;
+  /*Configure GPIO pins : LED_PIN_ON_Pin TP_RST_Pin */
+  GPIO_InitStruct.Pin = LED_PIN_ON_Pin|TP_RST_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;

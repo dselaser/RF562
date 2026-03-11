@@ -78,9 +78,12 @@ volatile int32_t  g_vca_err     = 0;
 volatile uint8_t  g_motor_active = 0;  /* 1=모터 PWM 중 → ADC 동결 */
 
 /* 니들 삽입 깊이 (0.5 ~ 3.5 mm, 런타임 변경 가능) */
-volatile float    g_needle_depth_mm = 1.5f;  /* ← VCA_DEPTH_MM_MAX 와 일치시킬 것 */
+volatile float    g_needle_depth_mm = 2.0f;  /* slider=3 → (3+1)*0.50 = 2.00mm */
 /* PROBE 결과: 0=무부하, 1=유부하(피부 감지) */
 volatile uint8_t  g_load_detected = 0U;
+
+/* GUI READY/STBY 상태: 0=STBY(스위치 무시), 1=READY(스위치 허용) */
+volatile uint8_t  g_gui_ready = 0U;
 
 /* Debug */
 volatile float   g_u_dbg    = 0;
@@ -382,8 +385,8 @@ static void Loop1_SetTarget(int32_t i_target_mA)
  * ─────────────────────────────────────────────────────────────────────────*/
 #define VCA_ADC_HOME          (3300)
 #define VCA_ADC_PER_MM        (10200)  /* 실측: (39000-3300)/3.5mm */
-#define VCA_DEPTH_MM_MIN      (1.5f)   /* 선형화 유효 최소 깊이 */
-#define VCA_DEPTH_MM_MAX      (4.0f)   /* 선형화 유효 최대 깊이 */
+#define VCA_DEPTH_MM_MIN      (0.5f)   /* slider 0 → 0.50mm */
+#define VCA_DEPTH_MM_MAX      (3.5f)   /* slider 6 → 3.50mm */
 #define VCA_ADC_MAX_SAFE      (39000)  /* 40000보다 1000 여유 */
 /* ── 깊이 → ADC 변환 ────────────────────────────────────────────────────
  *  실측: ADC_HOME=3300, ADC 39000 = 실제 3.5mm
@@ -440,24 +443,22 @@ static void Loop1_SetTarget(int32_t i_target_mA)
 #define VCA_DB_MOVE           (400)
 
 /* ══ 선형화 LUT: 원하는 깊이(mm) → 필요한 duty ═══════════════════════════
- *  2차 측정 데이터 (선형화 1차 적용 후):
- *    G100 (duty 0.2026) → 1.65mm
- *    G150 (duty 0.2079) → 2.00mm
- *    G200 (duty 0.2132) → 2.33mm
- *    G250 (duty 0.2203) → 2.52mm
- *    G300 (duty 0.2293) → 2.90mm
- *    G350 (duty 0.2382) → 3.28mm
- *    G400 (duty 0.3516) → 4.00mm
+ *  3차 교정 (LCD 슬라이더 실측 2026-03-09):
+ *    duty 0.1984 → 실측 1.80mm  (slider 1)
+ *    duty 0.2079 → 실측 2.10mm  (slider 3)
+ *    duty 0.2196 → 실측 2.51mm  (slider 4)
+ *    duty 0.2316 → 실측 3.07mm  (slider 5)
+ *    duty 0.2729 → 실측 3.84mm  (slider 6)
  *
- *  역변환: desired_depth_mm → required_duty
- *  구간별 선형 보간으로 비선형 VCA 특성 보상
+ *  역변환: desired_depth → 보간(duty, actual) 으로 필요 duty 산출
+ *  ★ 하한 ~1.8mm 이하는 VCA 스프링+PROBE 한계로 도달 불가
  * ═══════════════════════════════════════════════════════════════════════*/
 #define LIN_LUT_N  8
 static const float lut_depth[LIN_LUT_N] = {
-    0.00f, 1.65f, 2.00f, 2.33f, 2.52f, 2.90f, 3.28f, 4.00f
+    0.00f, 1.00f, 1.80f, 2.10f, 2.51f, 3.07f, 3.84f, 4.50f
 };
 static const float lut_duty[LIN_LUT_N] = {
-    0.192f, 0.2026f, 0.2079f, 0.2132f, 0.2203f, 0.2293f, 0.2382f, 0.3516f
+    0.185f, 0.190f, 0.1984f, 0.2079f, 0.2196f, 0.2316f, 0.2729f, 0.30f
 };
 
 static float depth_to_duty(float depth_mm)
@@ -813,7 +814,7 @@ void HPSwitchTask(void *argument)
     PID_Reset(&s_pid_move);
     PID_Reset(&s_pid_hold);
 
-    if (last_in_push) {
+    if (last_in_push && g_gui_ready) {
         vca_on();
         TLE9201_SetDir(DIR_PUSH);
         {   /* PROBE duty = min(PROBE_DUTY, 선형화 duty) */
@@ -911,11 +912,27 @@ void HPSwitchTask(void *argument)
         s_pos_prev    = (int32_t)pos;
         s_vel_lp      = s_vel_lp + VCA_VEL_DAMP_ALPHA * ((float)dpos - s_vel_lp);
 
+        /* ── 2-c. STBY 게이트: g_gui_ready=0 이면 모터 완전 차단 ──────── */
+        if (!g_gui_ready) {
+            /* 진행 중인 동작이 있으면 즉시 정지 */
+            if (s_state != VCA_HOME_OFF) {
+                Loop1_Stop();
+                VCA_SetDuty(0.0f);
+                vca_off();
+                g_motor_active = 0;
+                s_state    = VCA_HOME_OFF;
+                release_t0 = 0U;
+            }
+            last_in_push = in_push;  /* 에지 소비: READY 전환 시 재트리거 방지 */
+            osDelay(VCA_PID_DT_MS);
+            continue;
+        }
+
         /* ── 3. 스위치 에지 이벤트 ─────────────────────────────────────── */
         if (in_push != last_in_push) {
             last_in_push = in_push;
-            if (in_push) {
-                /* 스위치 ON: PROBE 상태로 진입 (저duty로 1mm 전진하며 전류 측정) */
+            if (in_push && g_gui_ready) {
+                /* 스위치 ON: READY 상태에서만 PROBE 진입 (STBY면 무시) */
                 s_push_t0   = now;
                 s_push_pos0 = (uint16_t)pos;
                 PID_Reset(&s_pid_move);
@@ -1241,51 +1258,26 @@ void HPSwitchTask(void *argument)
 }  /* end HPSwitchTask */
 
 /* ═══════════════════════════════════════════════════════════════════════════
- *  ADS8325 타이머 구동 ADC
+ *  ADS8325 직접 폴링 ADC (TIM7 비사용)
  *
- *  TIM7 (4 kHz ISR) → 카운터 증가만 (~100ns)
- *  ADS8325_AcqTask (5 ms) → 카운터만큼 SPI burst → trimmed mean → IIR
+ *  ※ TIM7은 HAL timebase + LVGL tick (1kHz)로 사용 중이므로
+ *     ADS8325 샘플링에 TIM7를 재설정할 수 없음.
+ *     대신 Task 내에서 직접 20개 burst 읽기 (280μs/5ms ≈ 5.6%)
  *
- *  SPI1: 2.667 MHz SCLK (CubeMX prescaler=16, 런타임 변경 금지)
- *  TIM7: 250 μs 주기 (4 kHz), 5ms에 ~20개 burst → 강력한 잡음 제거
- *  CPU: 20 × 14μs = 280μs / 5ms ≈ 5.6%
+ *  SPI1: PLL1Q/16 SCLK (CubeMX prescaler=16, 런타임 변경 금지)
  * ═══════════════════════════════════════════════════════════════════════════*/
 
-/* ── TIM7 ISR: 카운터만 증가 (SPI 접근 금지) ──
- *  HAL SPI는 내부 Lock+timeout → ISR에서 데드락 위험
- *  ISR: ~100ns (카운터 증가만)
- *  Task: 카운터만큼 SPI burst 읽기 → 안전 */
-static volatile uint16_t s_adc_req = 0;  /* ISR이 증가, Task가 소비 */
-
-void ADS8325_TIM7_ISR_Handler(void)
-{
-    if (!g_motor_active) {
-        s_adc_req++;
-    }
-}
-
-/* ── ADC Task: TIM7 카운터 기반 burst 읽기 + 필터 ── */
+/* ── ADC Task: 직접 폴링 burst 읽기 + 필터 ── */
 void ADS8325_AcqTask(void *argument)
 {
     (void)argument;
     ADS8325_Init(&g_ads8325, &hspi1, GPIOA, GPIO_PIN_4);
 
-    /* ⚠ SPI1 속도는 CubeMX에서 설정 (런타임 변경 금지)
-     *  prescaler=16 (2.667MHz) → CubeMX에서 복원 필요
-     *  런타임 HAL_SPI_Init/레지스터 수정은 UART 깨짐 부작용 */
-
-    /* TIM7: 4 kHz 타이머 → 5ms마다 ~20개 burst
-     *  ISR: 카운터 증가만 (~100ns)
-     *  Task: 5ms 주기, ~20개 burst × 14μs = 280μs → CPU ~5.6%
-     *  이전(9개/5ms, median+IIR0.15) → 개선(20개/5ms, trimmed mean+IIR0.10) */
-    extern TIM_HandleTypeDef htim7;
-    __HAL_TIM_SET_AUTORELOAD(&htim7, 15999U); /* 64MHz/(15999+1)=4kHz */
-    HAL_TIM_Base_Start_IT(&htim7);
-
     /* ── 처리 파라미터 ── */
-    #define BATCH_MAX     24    /* 한 번에 최대 처리 개수 (5ms×4kHz=20, 여유+4) */
+    #define BATCH_COUNT   20    /* 5ms 주기당 직접 읽기 개수 */
+    #define BATCH_MAX     24
     #define TRIM_PCT      25    /* 상하 25% 절삭 → 20개 중 10개만 평균 */
-    #define IIR_ALPHA     (0.10f)  /* 강한 평활: τ≈50ms, 이전 0.15보다 강력 */
+    #define IIR_ALPHA     (0.10f)  /* 강한 평활: τ≈50ms */
     #define SPIKE_TH      (3000)
     #define SETTLE_BATCHES 4    /* 모터 정지 후 20ms(4배치×5ms) 대기 */
 
@@ -1294,35 +1286,28 @@ void ADS8325_AcqTask(void *argument)
     static float    s_iir_acc    = 0.0f;
 
     for (;;) {
-        osDelay(5);  /* 5ms 주기 — TIM7(4kHz)×5ms=20샘플 축적 */
+        osDelay(5);  /* 5ms 주기 */
 
-        /* 모터 동작 중 → 카운터 리셋, settle 예약 */
+        /* 모터 동작 중 → settle 예약 */
         if (g_motor_active) {
-            s_adc_req = 0;
             s_settle_cnt = SETTLE_BATCHES;
             continue;
         }
 
         /* 모터 정지 직후 → back-EMF 대기 */
         if (s_settle_cnt > 0) {
-            s_adc_req = 0;
             s_settle_cnt--;
             continue;
         }
 
-        /* ── TIM7 카운터에서 읽을 개수 결정 ── */
-        uint16_t n_req = s_adc_req;
-        s_adc_req = 0;
-        if (n_req == 0) continue;
-        if (n_req > BATCH_MAX) n_req = BATCH_MAX;
-
         /* ── SPI burst 읽기 (Task 컨텍스트 — 안전) ── */
         uint16_t buf[BATCH_MAX];
+        uint16_t n_req = BATCH_COUNT;
         for (uint16_t i = 0; i < n_req; i++) {
             buf[i] = ADS8325_Read(&g_ads8325);
         }
 
-        /* ── 정렬 (insertion sort, N≤128) ── */
+        /* ── 정렬 (insertion sort, N≤24) ── */
         uint16_t avail = n_req;
         for (int i = 1; i < (int)avail; i++) {
             uint16_t key = buf[i];
@@ -1383,8 +1368,14 @@ void ADS8325_AcqTask(void *argument)
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- *  ADS8325_RS485_Task  (UART 전송)
+ *  ADS8325_RS485_Task  (UART2 전송)
  * ═══════════════════════════════════════════════════════════════════════════*/
+
+/* 1 = 기존 측정값 출력, 0 = HP 통신 프로토콜 (TX 전용) */
+#define RS485_MEASUREMENT_OUTPUT  0
+
+#if RS485_MEASUREMENT_OUTPUT
+/* ── 기존 측정값 출력 모드 ──────────────────────────────────────────────── */
 void ADS8325_RS485_Task(void *argument)
 {
     (void)argument;
@@ -1393,16 +1384,8 @@ void ADS8325_RS485_Task(void *argument)
     TickType_t last = xTaskGetTickCount();
     for (;;) {
         vTaskDelayUntil(&last, PERIOD);
-        /* nano.specs 에서 %f 가 동작 안 할 수 있으므로 정수로 변환 */
         int32_t duty_pct = (int32_t)(g_duty_dbg * 1000.0f);
-        (void)0;  /* TLE9201_ReadDiag 제거 - 내부에서 TLE9201_Enable(false) 호출하여 DIS=HIGH 됨 */
-        /* TIM8 레지스터 상태 출력 */
-        /* TIM8 레지스터 맵 덤프 (base=0x40013400)
-         * offset 0x00=CR1, 0x04=CR2, 0x08=SMCR, 0x0C=DIER
-         * offset 0x10=SR,  0x14=EGR, 0x18=CCMR1,0x1C=CCMR2
-         * offset 0x20=CCER,0x24=CNT, 0x28=PSC,  0x2C=ARR
-         * offset 0x30=RCR, 0x34=CCR1,0x38=CCR2, 0x3C=CCR3
-         * offset 0x40=CCR4,0x44=BDTR                        */
+        (void)duty_pct;
         int len = 0;
         len += snprintf(g_ads8325_buf, sizeof(g_ads8325_buf),
                         "$%u E%"PRId32";\r\n",
@@ -1415,6 +1398,233 @@ void ADS8325_RS485_Task(void *argument)
         } while (st == HAL_BUSY);
     }
 }
+
+#else  /* ═══ RS485 HP 슬레이브 모드 (RX→응답 전용) ═══
+ *
+ *  이 장치 = HP(핸드피스, 슬레이브)
+ *  Main 보드가 10 ms마다 @Q*51\n 등을 보내면,
+ *  HP는 수신 후에만 응답 전송.  자율 송신 절대 금지 (충돌 방지).
+ *
+ *  [Main TX] ──→ RS485 bus ──→ [HP RX] → 파싱 → [HP TX 응답]
+ *                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ *                              이 코드가 담당하는 부분
+ * ═══════════════════════════════════════════════════════════ */
+
+/* ── HP 로컬 상태 (GUI에서 설정, @Q 응답에 사용) ── */
+volatile uint8_t g_rf_power = 5;   /* PWR 슬라이더 값 0~9 */
+volatile uint8_t g_ui_update_pending = 0;  /* RS485 → UI 업데이트 플래그 */
+
+/* ── XOR 패리티 계산 ── */
+static uint8_t rs485_parity(const uint8_t *d, uint16_t len)
+{
+    uint8_t x = 0;
+    for (uint16_t i = 0; i < len; i++) x ^= d[i];
+    return x;
+}
+
+/* ── HEX 문자 → 4-bit 값 (-1 = 에러) ── */
+static int8_t hex_val(uint8_t ch)
+{
+    if (ch >= '0' && ch <= '9') return (int8_t)(ch - '0');
+    if (ch >= 'A' && ch <= 'F') return (int8_t)(ch - 'A' + 10);
+    if (ch >= 'a' && ch <= 'f') return (int8_t)(ch - 'a' + 10);
+    return -1;
+}
+
+/* ── 응답 프레임 빌드: @<payload>*XX\n ── */
+static uint16_t rs485_resp(uint8_t *buf, const uint8_t *pl, uint16_t plen)
+{
+    static const char HEX[] = "0123456789ABCDEF";
+    uint16_t i = 0;
+    buf[i++] = '@';
+    for (uint16_t j = 0; j < plen; j++) buf[i++] = pl[j];
+    uint8_t par = rs485_parity(pl, plen);
+    buf[i++] = '*';
+    buf[i++] = HEX[(par >> 4) & 0x0F];
+    buf[i++] = HEX[par & 0x0F];
+    buf[i++] = '\n';
+    return i;
+}
+
+/* ── 수신 프레임 파싱 & 응답 전송 ── */
+static void rs485_process(const uint8_t *frm, uint16_t flen)
+{
+    /* 최소 @X*XX\n = 6 바이트 */
+    if (flen < 6 || frm[0] != '@') return;
+
+    /* '*' 위치 검색 */
+    uint16_t star = 0;
+    for (uint16_t i = 1; i < flen; i++) {
+        if (frm[i] == '*') { star = i; break; }
+    }
+    if (star == 0 || star + 3 > flen) return;
+
+    /* ── 패리티 검증 ── */
+    int8_t hh = hex_val(frm[star + 1]);
+    int8_t hl = hex_val(frm[star + 2]);
+    if (hh < 0 || hl < 0) return;
+    uint8_t rx_par = ((uint8_t)hh << 4) | (uint8_t)hl;
+
+    const uint8_t *pl  = &frm[1];       /* payload */
+    uint16_t       plen = star - 1;      /* payload 길이 */
+    if (rs485_parity(pl, plen) != rx_par) return;   /* 불일치 → 무시 */
+
+    /* ── 커맨드 처리 & 응답 페이로드 구성 ── */
+    uint8_t  resp[12];
+    uint16_t rlen = 0;
+
+    switch (pl[0]) {
+    case 'Q': {
+        /* ── 현재 HP 상태 보고 ──
+         *  응답: @B<btn><rdy>P<pp>N<nn>*XX\n
+         *   btn = 물리스위치 0/1
+         *   rdy = R(READY) / S(STBY)
+         *   pp  = RF Power  01~10
+         *   nn  = Needle depth×10  05~35         */
+        resp[rlen++] = 'B';
+        resp[rlen++] = g_sw_state ? '1' : '0';
+        resp[rlen++] = g_gui_ready ? 'R' : 'S';
+        {
+            uint8_t pwr = g_rf_power + 1;          /* 0~9 → 01~10 */
+            resp[rlen++] = 'P';
+            resp[rlen++] = (uint8_t)('0' + (pwr / 10) % 10);
+            resp[rlen++] = (uint8_t)('0' + pwr % 10);
+
+            uint8_t ndl = (uint8_t)(g_needle_depth_mm * 10.0f + 0.5f);
+            resp[rlen++] = 'N';
+            resp[rlen++] = (uint8_t)('0' + (ndl / 10) % 10);
+            resp[rlen++] = (uint8_t)('0' + ndl % 10);
+        }
+        break;
+    }
+    case 'B': {
+        /* ── Main → HP 상태 일괄 설정 ──
+         *  B<btn><rdy>P<pp>N<nn>   (9 chars)
+         *  btn  : 물리스위치 상태 (HP는 무시 — HW 입력)
+         *  rdy  : R=READY, S=STBY → g_gui_ready
+         *  pp   : 01~10 → g_rf_power = pp-1 (0~9)
+         *  nn   : 05~35 → g_needle_depth_mm = nn/10.0   */
+        if (plen < 9 || pl[3] != 'P' || pl[6] != 'N') break;
+
+        g_gui_ready = (pl[2] == 'R') ? 1 : 0;
+
+        uint8_t pp = (uint8_t)((pl[4] - '0') * 10 + (pl[5] - '0'));
+        g_rf_power = (pp > 0) ? (uint8_t)(pp - 1) : 0;
+
+        uint8_t nn = (uint8_t)((pl[7] - '0') * 10 + (pl[8] - '0'));
+        g_needle_depth_mm = nn / 10.0f;
+
+        g_ui_update_pending = 1;
+
+        /* ACK: echo full payload */
+        for (uint16_t i = 0; i < plen && rlen < sizeof(resp); i++)
+            resp[rlen++] = pl[i];
+        break;
+    }
+
+    case 'R':                              /* Ready 지시 */
+        g_gui_ready = 1;
+        g_ui_update_pending = 1;
+        resp[rlen++] = 'R';
+        break;
+
+    case 'S':                              /* Stop 지시 */
+        g_gui_ready = 0;
+        g_ui_update_pending = 1;
+        resp[rlen++] = 'S';
+        break;
+
+    case 'P':                              /* RF Power 개별 설정 */
+        if (plen >= 3) {
+            uint8_t pp = (uint8_t)((pl[1] - '0') * 10 + (pl[2] - '0'));
+            g_rf_power = (pp > 0) ? (uint8_t)(pp - 1) : 0;
+            g_ui_update_pending = 1;
+        }
+        resp[rlen++] = pl[0];
+        if (plen >= 3) { resp[rlen++] = pl[1]; resp[rlen++] = pl[2]; }
+        break;
+
+    case 'N':                              /* Needle depth 개별 설정 */
+        if (plen >= 3) {
+            uint8_t nn = (uint8_t)((pl[1] - '0') * 10 + (pl[2] - '0'));
+            g_needle_depth_mm = nn / 10.0f;
+            g_ui_update_pending = 1;
+        }
+        resp[rlen++] = pl[0];
+        if (plen >= 3) { resp[rlen++] = pl[1]; resp[rlen++] = pl[2]; }
+        break;
+
+    case 'W':                              /* 기타 값 커맨드 (ACK만) */
+        resp[rlen++] = pl[0];
+        if (plen >= 3) { resp[rlen++] = pl[1]; resp[rlen++] = pl[2]; }
+        break;
+
+    default:
+        return;                            /* 알 수 없는 커맨드 → 무응답 */
+    }
+
+    /* ── 응답 프레임 전송 ── */
+    if (rlen == 0) return;      /* 포맷 에러 등으로 응답 없음 */
+    uint16_t txlen = rs485_resp((uint8_t *)g_ads8325_buf, resp, rlen);
+
+    HAL_StatusTypeDef st;
+    do {
+        st = Uart2_Tx_IT((uint8_t *)g_ads8325_buf, txlen);
+        if (st == HAL_BUSY) osDelay(10);
+    } while (st == HAL_BUSY);
+}
+
+/* ═══════════════════════════════════════════════════════════
+ *  ADS8325_RS485_Task — HP 슬레이브 메인 루프
+ *
+ *  Main 보드의 프레임을 수신 → 파싱 → 응답.
+ *  자율 송신 없음 — Main 수신 후에만 응답.
+ *
+ *  USART2 FIFO 모드 활성화 (8-byte HW FIFO):
+ *   - osDelay 중 도착한 6-byte 프레임이 FIFO에 모두 버퍼링
+ *   - ORE(오버런) 에러 자동 클리어
+ *   - '@' 문자로 프레임 재동기화 (별도 타임아웃 불필요)
+ * ═══════════════════════════════════════════════════════════*/
+void ADS8325_RS485_Task(void *argument)
+{
+    (void)argument;
+    gUart2TxTaskHandle = xTaskGetCurrentTaskHandle();
+
+    uint8_t  rx_buf[32];
+    uint16_t rx_idx = 0;
+    USART_TypeDef *uart = huart2.Instance;
+
+    for (;;) {
+        /* ── 에러 플래그 클리어 (ORE/FE/NE) ── */
+        uint32_t isr = uart->ISR;
+        if (isr & (USART_ISR_ORE | USART_ISR_FE | USART_ISR_NE))
+            uart->ICR = USART_ICR_ORECF | USART_ICR_FECF | USART_ICR_NECF;
+
+        /* ── RXNE/RXFNE: FIFO에 수신 데이터 있으면 읽기 ── */
+        if (isr & USART_ISR_RXNE_RXFNE) {
+            uint8_t ch = (uint8_t)(uart->RDR & 0xFF);
+
+            if (ch == '@') rx_idx = 0;              /* 프레임 시작 → 재동기화 */
+
+            if (rx_idx < sizeof(rx_buf)) {
+                rx_buf[rx_idx++] = ch;
+                if (ch == '\n' && rx_idx >= 6) {    /* 프레임 완성 */
+                    rs485_process(rx_buf, rx_idx);
+                    rx_idx = 0;
+                }
+            } else {
+                rx_idx = 0;   /* 버퍼 오버플로우 → 리셋, 다음 @으로 재동기 */
+            }
+            /* FIFO에 데이터 남아있을 수 있음 → delay 없이 즉시 재확인 */
+        } else {
+            /* ── FIFO 비어있음 → CPU 양보 ── */
+            /* 주의: rx_idx 리셋 안 함! 프레임 수신 도중일 수 있음.
+             * '@' 문자가 도착하면 자동으로 재동기화됨. */
+            osDelay(1);                             /* 터치/LVGL 동작 보장 */
+        }
+    }
+}
+#endif /* RS485_MEASUREMENT_OUTPUT */
 
 static HAL_StatusTypeDef Uart1_Tx_IT(uint8_t *pData, uint16_t size)
 {

@@ -1,9 +1,9 @@
 /* USER CODE BEGIN Header */
 /**
   ******************************************************************************
-  * @file    tim.h
+  * @file    dcache.h
   * @brief   This file contains all the function prototypes for
-  *          the tim.c file
+  *          the dcache.c file
   ******************************************************************************
   * @attention
   *
@@ -18,8 +18,8 @@
   */
 /* USER CODE END Header */
 /* Define to prevent recursive inclusion -------------------------------------*/
-#ifndef __TIM_H__
-#define __TIM_H__
+#ifndef __DCACHE_H__
+#define __DCACHE_H__
 
 #ifdef __cplusplus
 extern "C" {
@@ -32,21 +32,13 @@ extern "C" {
 
 /* USER CODE END Includes */
 
-extern TIM_HandleTypeDef htim1;
-
-extern TIM_HandleTypeDef htim6;
-
-extern TIM_HandleTypeDef htim8;
+extern DCACHE_HandleTypeDef hdcache1;
 
 /* USER CODE BEGIN Private defines */
 
 /* USER CODE END Private defines */
 
-void MX_TIM1_Init(void);
-void MX_TIM6_Init(void);
-void MX_TIM8_Init(void);
-
-void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
+void MX_DCACHE1_Init(void);
 
 /* USER CODE BEGIN Prototypes */
 
@@ -56,5 +48,5 @@ void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
 }
 #endif
 
-#endif /* __TIM_H__ */
+#endif /* __DCACHE_H__ */
 

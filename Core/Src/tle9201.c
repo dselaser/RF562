@@ -83,15 +83,7 @@ uint32_t TLE92xx_ReadDIAG(void){
 
 
 void TLE9201_Enable(bool en){
-  if(!en){
-    /* Disable 시 잔류 진동 방지:
-     * - PWM duty를 먼저 0으로 만든 뒤 DIS=1(Hi-Z)로 차단
-     */
-    TLE9201_SetPWM_duty(0.0f);
-    HAL_GPIO_WritePin(TLE9201_DIS_GPIO_Port, TLE9201_DIS_Pin, GPIO_PIN_SET);
-  } else {
-    HAL_GPIO_WritePin(TLE9201_DIS_GPIO_Port, TLE9201_DIS_Pin, GPIO_PIN_RESET);
-  }
+  HAL_GPIO_WritePin(TLE9201_DIS_GPIO_Port, TLE9201_DIS_Pin, en?GPIO_PIN_RESET:GPIO_PIN_SET);
 }
 
 void TLE9201_SetDir(bool forward){

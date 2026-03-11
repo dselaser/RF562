@@ -139,7 +139,7 @@ static TaskHandle_t find_task_by_index(int idx)
     n = uxTaskGetSystemState(statusArr, n, NULL);
 
     char prefix[8];
-    snprintf(prefix, sizeof(prefix), "%d", idx);
+    snprintf(prefix, sizeof(prefix), "%02d", idx);   /* 2자리: K1→"01" → "01_LEDTask" 매칭 */
     size_t plen = strlen(prefix);
 
     for (UBaseType_t i = 0; i < n; i++) {
@@ -221,12 +221,12 @@ static void print_help(void)
         "\r\n====== COMMAND HELP =====\r\n"
         "h, help  : Show this help\r\n"
         "\r\n"
-        "Kx       : Suspend task whose name starts with 'x_'\r\n"
-        "Rx       : Resume task whose name starts with 'x_'\r\n"
+        "Kn       : Suspend task #nn (K1->01_LEDTask, K11->11_LVGL)\r\n"
+        "Rn       : Resume  task #nn (R1->01_LEDTask)\r\n"
         "KA       : Suspend ALL numbered tasks (except protected)\r\n"
         "RA       : Resume  ALL numbered tasks (except protected)\r\n"
-        "Xx       : Soft-restart task x (Suspend+Resume, Except protected Task)\r\n"
-        "XA       : Soft-restart ALL numbered tasks (Except protected Task)\r\n"
+        "Xn       : Soft-restart task #nn (Suspend+Resume, protected skip)\r\n"
+        "XA       : Soft-restart ALL numbered tasks (except protected)\r\n"
         "\r\n"
         "TC       : Reset CPU runtime counters baseline (for 't')\r\n"
         "s        : Show PID + target status\r\n"
@@ -735,11 +735,8 @@ static void print_task_stats(UART_HandleTypeDef *huart)
     UBaseType_t n = uxTaskGetNumberOfTasks();
     if (n > TASKSTAT_MAX) n = TASKSTAT_MAX;
 
-   // uint32_t totalRunTime = 0;
     configRUN_TIME_COUNTER_TYPE totalRunTime = 0;
-
     n = uxTaskGetSystemState(statusArr, n, &totalRunTime);
-    sort_task_status(statusArr, n);
 
     if (!gBaseValid) {
         TaskCpu_ResetAllBaselines();
@@ -753,22 +750,56 @@ static void print_task_stats(UART_HandleTypeDef *huart)
     uart_write_str("\r\nName              Prio St   CPU%   HWM(bytes)   StackFree\r\n");
     uart_write_str(  "--------------------------------------------------------------\r\n");
 
-    for (UBaseType_t i = 0; i < n; i++) {
-        uint32_t dTask = TaskCpu_GetDeltaCounter(&statusArr[i]);
-        uint32_t cpu10 = (uint32_t)((1000ULL * (uint64_t)dTask) / (uint64_t)dTotal);
+    /* ── 마스터 태스크 목록 (번호순 출력, 비활성 포함) ── */
+    static const char * const all_names[] = {
+        "IDLE",
+        "00_UARTCmd",
+        "01_LEDTask",
+        "02_SysMonTask",
+        "03_ADS7041_U2",     /* 비활성 */
+        "04_ADXL345_U2",     /* 비활성 */
+        "05_ADXL345_U1",
+        "06_RS485",
+        "07_ADS8325_Acq",
+        "08_HPSwitch",
+        "09_Speaker",
+        "10_Default",
+        "11_LVGL",
+        "Tmr Svc",
+    };
+    const int all_cnt = (int)(sizeof(all_names) / sizeof(all_names[0]));
 
-        char st = (statusArr[i].eCurrentState == eSuspended) ? 'S' : 'R';
+    for (int t = 0; t < all_cnt; t++) {
+        /* statusArr에서 이름 검색 */
+        int found = -1;
+        for (UBaseType_t i = 0; i < n; i++) {
+            if (strcmp(statusArr[i].pcTaskName, all_names[t]) == 0) {
+                found = (int)i;
+                break;
+            }
+        }
 
         char line[96];
-        snprintf(line, sizeof(line),
-                 "%-16s %4lu  %c %6lu.%1lu %12u %11u\r\n",
-                 statusArr[i].pcTaskName,
-                 (unsigned long)statusArr[i].uxBasePriority,
-                 st,
-                 (unsigned long)(cpu10 / 10), (unsigned long)(cpu10 % 10),
-                 (unsigned)(statusArr[i].usStackHighWaterMark * sizeof(StackType_t)),
-                 (unsigned)statusArr[i].usStackHighWaterMark);
+        if (found >= 0) {
+            /* 활성 태스크: 실제 통계 출력 */
+            uint32_t dTask = TaskCpu_GetDeltaCounter(&statusArr[found]);
+            uint32_t cpu10 = (uint32_t)((1000ULL * (uint64_t)dTask) / (uint64_t)dTotal);
+            char st = (statusArr[found].eCurrentState == eSuspended) ? 'S' : 'R';
 
+            snprintf(line, sizeof(line),
+                     "%-16s %4lu  %c %6lu.%1lu %9u %9u\r\n",
+                     statusArr[found].pcTaskName,
+                     (unsigned long)statusArr[found].uxBasePriority,
+                     st,
+                     (unsigned long)(cpu10 / 10), (unsigned long)(cpu10 % 10),
+                     (unsigned)(statusArr[found].usStackHighWaterMark * sizeof(StackType_t)),
+                     (unsigned)statusArr[found].usStackHighWaterMark);
+        } else {
+            /* 비활성 태스크: N 상태 표시 */
+            snprintf(line, sizeof(line),
+                     "%-16s    -  N       -         -         -\r\n",
+                     all_names[t]);
+        }
         uart_write_str(line);
     }
 }
@@ -864,7 +895,7 @@ void UART_Cmd_Init(void)
     // Command Task 생성 (FreeRTOS native)
     // NOTE: 't' 명령/printf/snprintf 등으로 스택을 꽤 사용하므로 여유 있게.
     // xTaskCreate의 stackDepth는 'words' 단위입니다( Cortex-M: 1word=4bytes ).
-    xTaskCreate(UART_CmdTask, "0_UARTCmd", 128*3, NULL,
+    xTaskCreate(UART_CmdTask, "00_UARTCmd", 128*3, NULL,
                 osPriorityNormal, &sUartCmdTaskHandle);
 }
 

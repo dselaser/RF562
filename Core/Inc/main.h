@@ -59,14 +59,10 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define ALIVE_Pin GPIO_PIN_13
 #define ALIVE_GPIO_Port GPIOC
-#define SPI2_CS_Pin GPIO_PIN_0
-#define SPI2_CS_GPIO_Port GPIOC
+#define LCD_CS_Pin GPIO_PIN_0
+#define LCD_CS_GPIO_Port GPIOC
 #define USART2_DE_Pin GPIO_PIN_1
 #define USART2_DE_GPIO_Port GPIOA
-#define USART2_TX_Pin GPIO_PIN_2
-#define USART2_TX_GPIO_Port GPIOA
-#define USART2_RX_Pin GPIO_PIN_3
-#define USART2_RX_GPIO_Port GPIOA
 #define SPI1_CS_Pin GPIO_PIN_4
 #define SPI1_CS_GPIO_Port GPIOA
 #define DAC_Pin GPIO_PIN_5
@@ -89,12 +85,10 @@ void Error_Handler(void);
 #define HP_SW_GPIO_Port GPIOA
 #define HP_WS2812_Pin GPIO_PIN_9
 #define HP_WS2812_GPIO_Port GPIOA
-#define LCD_BL_Pin GPIO_PIN_10
-#define LCD_BL_GPIO_Port GPIOA
 #define LCD_RST_Pin GPIO_PIN_11
 #define LCD_RST_GPIO_Port GPIOA
-#define LCD_DS_Pin GPIO_PIN_12
-#define LCD_DS_GPIO_Port GPIOA
+#define LCD_DC_Pin GPIO_PIN_12
+#define LCD_DC_GPIO_Port GPIOA
 #define SPI3_CS_Pin GPIO_PIN_15
 #define SPI3_CS_GPIO_Port GPIOA
 #define SPI6_CS_Pin GPIO_PIN_2
@@ -103,10 +97,11 @@ void Error_Handler(void);
 #define I2C1_TP_SCL_GPIO_Port GPIOB
 #define I2C1_TP_SDA_Pin GPIO_PIN_7
 #define I2C1_TP_SDA_GPIO_Port GPIOB
-#define I2C1_TP_RST_Pin GPIO_PIN_8
-#define I2C1_TP_RST_GPIO_Port GPIOB
+#define TP_RST_Pin GPIO_PIN_8
+#define TP_RST_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
+void CNNX_I2C1_Init(void) ;
 
 /* USER CODE END Private defines */
 

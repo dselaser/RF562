@@ -14,6 +14,7 @@
 #include "usart.h"
 #include "cmsis_os2.h"
 #include <stdio.h>
+#include <math.h>
 
 
 
@@ -123,9 +124,6 @@ void ADXL345_UART2_Task(void *argument)
     {
         if (ADXL345_ReadRaw_I2C2(&acc) == HAL_OK)
         {
-            // raw 값 출력 (원하면 g 단위로 변환 가능)
-            // ADXL345 full-res, ±2g 일 때 약 3.9 mg/LSB
-            // float ax_g = acc.x * 0.0039f / 1000.0f; 등으로 계산 가능.
             len = snprintf(buf,
                            sizeof(buf),
                            "AX=%d AY=%d AZ=%d\r\n",
@@ -138,19 +136,80 @@ void ADXL345_UART2_Task(void *argument)
             len = snprintf(buf, sizeof(buf), "ADXL345 ERR\r\n");
         }
 
-        // ---- RS-485 송신 (UART2) ----
-        // DE Enable (송신 모드)
-     //   HAL_GPIO_WritePin(USART2_DE_GPIO_Port, USART2_DE_Pin, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(USART2_DE_GPIO_Port, USART2_DE_Pin, GPIO_PIN_SET);
+        HAL_UART_Transmit(&huart2, (uint8_t *)buf, (uint16_t)len, 50);
+        HAL_GPIO_WritePin(USART2_DE_GPIO_Port, USART2_DE_Pin, GPIO_PIN_RESET);
 
-     //   HAL_UART_Transmit(&huart2, (uint8_t *)buf, (uint16_t)len, 50);
-
-        // 송신 완료 후 약간의 여유를 주고 DE 비활성(수신모드)
-        // (보드 상황에 따라 delay는 줄이거나 제거 가능)
-        // osDelay(1);
-     //   HAL_GPIO_WritePin(USART2_DE_GPIO_Port, USART2_DE_Pin, GPIO_PIN_RESET);
-        // ------------------------------
-
-        // 샘플링/전송 주기 (예: 50ms → 20Hz)
         osDelay(50);
+    }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  LCD 자동 회전 (ADXL345 기반)
+ *
+ *  X축 = 니들 방향 (실측 확인 완료)
+ *    - 니들 DOWN: Px ≈ +87°   (tilt_from_down ≈  3°)
+ *    - 니들 UP  : Px ≈ -87°   (tilt_from_down ≈ 177°)
+ *
+ *  전환 기준: tilt_from_down = 90° → Px = 90° - 90° = 0°
+ *    히스테리시스 ±10°:
+ *      DOWN→UP 전환: Px < -10° (tilt > 100°)
+ *      UP→DOWN 전환: Px > +10° (tilt <  80°)
+ *
+ *  g_screen_rotated: 0=정상(니들DOWN), 1=180°회전(니들UP)
+ *    → lvglHandler에서 MADCTL 적용, touchpad_read에서 좌표 반전
+ * ═══════════════════════════════════════════════════════════════════════════*/
+volatile uint8_t g_screen_rotated = 0;
+
+void ADXL345_UART1_Task(void *argument)
+{
+    (void)argument;
+
+    ADXL345_Raw_t acc;
+
+    /* ADXL345 초기화 */
+    ADXL345_Init_I2C2();
+    osDelay(100);   /* 센서 안정화 */
+
+    /* 히스테리시스 임계값 (Px 도 단위) */
+    const float THRESH_TO_UP   = -10.0f;  /* Px < -10° → 화면 180° 회전 */
+    const float THRESH_TO_DOWN =  10.0f;  /* Px > +10° → 화면 정상       */
+
+    for (;;)
+    {
+        if (ADXL345_ReadRaw_I2C2(&acc) == HAL_OK)
+        {
+            /* ±2g full-res: 256 LSB/g → g 단위 변환 */
+            float ax = acc.x / 256.0f;
+            float ay = acc.y / 256.0f;
+            float az = acc.z / 256.0f;
+
+            /* Px: X축(니들 축) pitch 각도
+             *   니들DOWN → +87°,  니들UP → -87°,  수평 → 0° */
+            float px = atan2f(ax, sqrtf(ay*ay + az*az))
+                        * (180.0f / 3.14159265f);
+
+            /* ── 히스테리시스 화면 회전 판정 ───────────────────── */
+            if (!g_screen_rotated && px < THRESH_TO_UP) {
+                g_screen_rotated = 1;   /* 니들 UP → 화면 180° 회전 */
+            }
+            else if (g_screen_rotated && px > THRESH_TO_DOWN) {
+                g_screen_rotated = 0;   /* 니들 DOWN → 화면 정상 */
+            }
+
+#if 0   /* ── UART1 디버그 출력 (필요 시 1로 변경) ──────────── */
+            {
+                extern UART_HandleTypeDef huart1;
+                char buf[128];
+                int  len = snprintf(buf, sizeof(buf),
+                    "Px=%4d R=%d  X=%4d Y=%4d Z=%4d\r\n",
+                    (int)px, g_screen_rotated,
+                    acc.x, acc.y, acc.z);
+                HAL_UART_Transmit(&huart1, (uint8_t *)buf, (uint16_t)len, 100);
+            }
+#endif
+        }
+
+        osDelay(200);   /* 5 Hz 샘플링 */
     }
 }

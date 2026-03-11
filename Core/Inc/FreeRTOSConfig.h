@@ -46,6 +46,14 @@
 /* USER CODE BEGIN Includes */
 #include "stm32h562xx.h"
 
+#include "FreeRTOSConfig.h"
+// comment out by connexthings@naver.com
+// NEVER use it explicitly again,
+// it have been applied in the 'FreeRTOSConfig.h' by STM32CubeMX
+// #include "FreeRTOSConfig_User.h"
+// #ifndef configTOTAL_HEAP_SIZE
+//   #define configTOTAL_HEAP_SIZE    ((size_t)20192)  // 또는 기본값
+// #endif
 
 /* Section where include file can be added */
 /* USER CODE END Includes */
@@ -54,7 +62,6 @@
 #if defined(__ICCARM__) || defined(__ARMCC_VERSION) || defined(__GNUC__)
 #include <stdint.h>
 extern uint32_t SystemCoreClock;
-void xPortSysTickHandler(void);
 #endif
 #ifndef CMSIS_device_header
 #define CMSIS_device_header "stm32h5xx.h"
@@ -74,7 +81,7 @@ void xPortSysTickHandler(void);
 #define configTICK_RATE_HZ                       ((TickType_t)1000)
 #define configMAX_PRIORITIES                     ( 56 )
 #define configMINIMAL_STACK_SIZE                 ((uint16_t)128)
-#define configTOTAL_HEAP_SIZE                    ((size_t)15000)
+#define configTOTAL_HEAP_SIZE                    ((size_t)65536)
 #define configSTACK_ALLOCATION_FROM_SEPARATE_HEAP 0
 #define configMAX_TASK_NAME_LEN                  ( 16 )
 #define configUSE_TRACE_FACILITY                 1
@@ -88,6 +95,7 @@ void xPortSysTickHandler(void);
 #define configHEAP_CLEAR_MEMORY_ON_FREE          0
 #define configUSE_MINI_LIST_ITEM                 1
 #define configUSE_SB_COMPLETED_CALLBACK          0
+#define configCHECK_FOR_STACK_OVERFLOW          2
 /* USER CODE BEGIN MESSAGE_BUFFER_LENGTH_TYPE */
 extern void vConfigureTimerForRunTimeStats(void);
 #define configGENERATE_RUN_TIME_STATS           1
@@ -114,6 +122,9 @@ extern void vConfigureTimerForRunTimeStats(void);
 #define configTIMER_TASK_PRIORITY                ( 2 )
 #define configTIMER_QUEUE_LENGTH                 10
 #define configTIMER_TASK_STACK_DEPTH             128
+
+/* The following flag must be enabled only when using newlib */
+#define configUSE_NEWLIB_REENTRANT          1
 
 /* CMSIS-RTOS V2 flags */
 #define configUSE_OS2_THREAD_SUSPEND_RESUME  1

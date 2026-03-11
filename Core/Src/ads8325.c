@@ -27,15 +27,16 @@ HAL_StatusTypeDef ADS8325_Init(ADS8325_Handle_t *hadc,
     return HAL_OK;
 }
 
-/*
 uint16_t ADS8325_Read(const ADS8325_Handle_t *hadc)
 {
     uint8_t tx[3] = {0xFF, 0xFF, 0xFF};
     uint8_t rx[3] = {0, 0, 0};
     uint32_t val;
 
+    /* CS Low → 샘플링 시작 */
     HAL_GPIO_WritePin(hadc->cs_port, hadc->cs_pin, GPIO_PIN_RESET);
 
+    /* 짧은 setup 여유(수 ns면 충분, NOP 몇 개면 OK) */
     __NOP(); __NOP(); __NOP(); __NOP();
 
     if (HAL_SPI_TransmitReceive(hadc->hspi, tx, rx, 3, 5) != HAL_OK) {
@@ -43,33 +44,13 @@ uint16_t ADS8325_Read(const ADS8325_Handle_t *hadc)
         return 0;
     }
 
+    /* 변환/시프트 종료 */
     HAL_GPIO_WritePin(hadc->cs_port, hadc->cs_pin, GPIO_PIN_SET);
+
     val = ((uint32_t)(rx[0] & 0x7FU) << 9) | ((uint32_t)rx[1] << 1) | ((uint32_t)rx[2] >> 7);
+
     return (uint16_t)(val & 0xFFFFU);
 }
-*/
-
-uint16_t ADS8325_Read(const ADS8325_Handle_t *hadc)
-{
-    uint8_t tx[3] = {0x00, 0x00, 0x00};
-    uint8_t rx[3] = {0, 0, 0};
-
-    HAL_GPIO_WritePin(hadc->cs_port, hadc->cs_pin, GPIO_PIN_RESET);
-    __NOP(); __NOP(); __NOP(); __NOP();
-
-    if (HAL_SPI_TransmitReceive(hadc->hspi, tx, rx, 3, 5) != HAL_OK) {
-        HAL_GPIO_WritePin(hadc->cs_port, hadc->cs_pin, GPIO_PIN_SET);
-        return 0;
-    }
-
-    HAL_GPIO_WritePin(hadc->cs_port, hadc->cs_pin, GPIO_PIN_SET);
-
-    // ADS8325: CS↓ 후 1 dummy bit → 16bit 데이터
-    // 3바이트(24클럭) 중 bit22~bit7 = 16bit 데이터
-    uint32_t raw = ((uint32_t)rx[0] << 16) | ((uint32_t)rx[1] << 8) | rx[2];
-    return (uint16_t)((raw >> 7) & 0xFFFF);
-}
-
 
 HAL_StatusTypeDef ADS8325_ReadN(const ADS8325_Handle_t *hadc, uint16_t *dst, size_t n)
 {

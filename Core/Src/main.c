@@ -21,7 +21,10 @@
 #include "cmsis_os2.h"
 #include "adc.h"
 #include "dac.h"
+#include "dcache.h"
+#include "gpdma.h"
 #include "i2c.h"
+#include "icache.h"
 #include "spi.h"
 #include "tim.h"
 #include "usart.h"
@@ -30,16 +33,13 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
-#include "my_tasks.h"
-
-extern SPI_HandleTypeDef hspi1;
-extern UART_HandleTypeDef huart2;
-
-#define  SAMPLE_COUNT 10
-uint16_t adc_buffer[SAMPLE_COUNT];
-volatile uint8_t sample_index = 0;
-volatile uint8_t data_ready_flag = 0;
-uint32_t average_value = 0;
+#include "cnnx_proj.h"
+#include "lvgl/lvgl.h"
+#include "lv_port_disp.h"
+#include "lv_port_indev.h"
+#include "lvgl/demos/lv_demos.h"
+#include "ST7789V2.h"
+#include "ui.h"
 
 /* USER CODE END Includes */
 
@@ -73,6 +73,10 @@ void MX_FREERTOS_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+// proxy function to access a static function
+void CNNX_I2C1_Init(void) {
+  MX_I2C1_Init();
+}
 
 /* USER CODE END 0 */
 
@@ -105,6 +109,7 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_GPDMA1_Init();
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
   MX_I2C1_Init();
@@ -115,12 +120,25 @@ int main(void)
   MX_SPI6_Init();
   MX_TIM8_Init();
   MX_ADC1_Init();
-  MX_ADC2_Init();
   MX_DAC1_Init();
+  MX_ADC2_Init();
+  MX_TIM1_Init();
   MX_TIM6_Init();
-  MX_TIM7_Init();
+  MX_DCACHE1_Init();
+  MX_ICACHE_Init();
   /* USER CODE BEGIN 2 */
-  HAL_TIM_Base_Start_IT(&htim6);   // Loop-1 시작
+
+  HAL_TIM_Base_Start_IT(&htim6);   // Loop-1 motor control ISR start
+  printf( "\r\n\n\n\n\n\007   cnnx H562 FreeRTOS lvgl v8.3.11 Test @ %s %s \r\n\n", __DATE__, __TIME__ ) ;
+  //  LCD Backlight OFF — lvglHandler에서 첫 프레임 렌더링 후 켜짐 (노이즈 방지)
+  DEV_BL_PIN = 0 ;
+
+  //   Initialize lvgl
+  lv_init();            //Initialize LVGL UI library
+  lv_port_disp_init();  // initialize the display drivers
+  lv_port_indev_init();
+  printf("   ... lv_port_disp_init() & lv_port_indev_init() OK\r\n");
+
   /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -155,7 +173,7 @@ void SystemClock_Config(void)
 
   /** Configure the main internal regulator output voltage
   */
-  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE0);
 
   while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
 
@@ -167,12 +185,12 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.LSIState = RCC_LSI_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLL1_SOURCE_HSE;
-  RCC_OscInitStruct.PLL.PLLM = 1;
-  RCC_OscInitStruct.PLL.PLLN = 16;
+  RCC_OscInitStruct.PLL.PLLM = 2;
+  RCC_OscInitStruct.PLL.PLLN = 120;
   RCC_OscInitStruct.PLL.PLLP = 2;
-  RCC_OscInitStruct.PLL.PLLQ = 3;
+  RCC_OscInitStruct.PLL.PLLQ = 4;
   RCC_OscInitStruct.PLL.PLLR = 2;
-  RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1_VCIRANGE_3;
+  RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1_VCIRANGE_2;
   RCC_OscInitStruct.PLL.PLLVCOSEL = RCC_PLL1_VCORANGE_WIDE;
   RCC_OscInitStruct.PLL.PLLFRACN = 0;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
@@ -186,36 +204,59 @@ void SystemClock_Config(void)
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2
                               |RCC_CLOCKTYPE_PCLK3;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
-  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV4;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
   RCC_ClkInitStruct.APB3CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_3) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_5) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+   /* Select SysTick source clock */
+  HAL_SYSTICK_CLKSourceConfig(SYSTICK_CLKSOURCE_HCLK);
+
+   /* Re-Initialize Tick with new clock source */
+  if (HAL_InitTick(TICK_INT_PRIORITY) != HAL_OK)
   {
     Error_Handler();
   }
 
   /** Configure the programming delay
   */
-  __HAL_FLASH_SET_PROGRAM_DELAY(FLASH_PROGRAMMING_DELAY_1);
+  __HAL_FLASH_SET_PROGRAM_DELAY(FLASH_PROGRAMMING_DELAY_2);
 }
 
 /* USER CODE BEGIN 4 */
-void ADS8325_TIM7_ISR_Handler(void);   /* my_tasks.c */
-
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
-    if (htim->Instance == TIM6) {
-    	Loop1_TIM6_ISR_Handler();
-    	return;
-    }
-    if (htim->Instance == TIM7) {
-    	ADS8325_TIM7_ISR_Handler();
-    	return;
-    }
-}
-
+void Loop1_TIM6_ISR_Handler(void);   /* my_tasks.c */
 /* USER CODE END 4 */
+
+/**
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM7 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  /* USER CODE BEGIN Callback 0 */
+  if (htim->Instance == TIM6)
+  {
+    Loop1_TIM6_ISR_Handler();
+    return;
+  }
+  /* USER CODE END Callback 0 */
+  if (htim->Instance == TIM7)
+  {
+    HAL_IncTick();
+  }
+  /* USER CODE BEGIN Callback 1 */
+
+  /* USER CODE END Callback 1 */
+}
 
 /**
   * @brief  This function is executed in case of error occurrence.
