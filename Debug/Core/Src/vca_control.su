@@ -1,4 +1,0 @@
-../Core/Src/vca_control.c:9:6:VCA_Init	8	static
-../Core/Src/vca_control.c:15:6:VCA_Set	16	static
-../Core/Src/vca_control.c:20:6:VCA_StopBrake	8	static
-../Core/Src/vca_control.c:26:6:VCA_Disable	8	static

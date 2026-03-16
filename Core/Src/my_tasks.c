@@ -83,7 +83,7 @@ volatile float    g_needle_depth_mm = 2.0f;  /* slider=3 → (3+1)*0.50 = 2.00mm
 volatile uint8_t  g_load_detected = 0U;
 
 /* GUI READY/STBY 상태: 0=STBY(스위치 무시), 1=READY(스위치 허용) */
-volatile uint8_t  g_gui_ready = 0U;
+volatile uint8_t  g_gui_ready = 1U;
 
 /* Debug */
 volatile float   g_u_dbg    = 0;

@@ -22,8 +22,6 @@ extern void ui_event_Slider2(lv_event_t * e);
 extern lv_obj_t * ui_Slider2;
 extern void ui_event_Slider1(lv_event_t * e);
 extern lv_obj_t * ui_Slider1;
-extern lv_obj_t * ui_LabelPWR;
-extern lv_obj_t * ui_LabelNEEDLE;
 // CUSTOM VARIABLES
 extern lv_obj_t * uic_ImgButton1;
 

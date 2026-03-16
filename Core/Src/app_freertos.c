@@ -155,14 +155,14 @@ static const osThreadAttr_t hp_attr = {
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
 const osThreadAttr_t defaultTask_attributes = {
-  .name = "10_Default",
+  .name = "defaultTask",
   .priority = (osPriority_t) osPriorityNormal,
   .stack_size = 128 * 4
 };
 /* Definitions for _lvglHandler */
 osThreadId_t _lvglHandlerHandle;
 const osThreadAttr_t _lvglHandler_attributes = {
-  .name = "11_LVGL",
+  .name = "_lvglHandler",
   .priority = (osPriority_t) osPriorityLow,
   .stack_size = 2048 * 4
 };

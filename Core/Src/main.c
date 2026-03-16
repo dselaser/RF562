@@ -123,9 +123,9 @@ int main(void)
   MX_DAC1_Init();
   MX_ADC2_Init();
   MX_TIM1_Init();
-  MX_TIM6_Init();
   MX_DCACHE1_Init();
   MX_ICACHE_Init();
+  MX_TIM6_Init();
   /* USER CODE BEGIN 2 */
 
   HAL_TIM_Base_Start_IT(&htim6);   // Loop-1 motor control ISR start

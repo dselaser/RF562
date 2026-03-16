@@ -1,4 +1,0 @@
-../Core/Src/ads8325.c:12:19:ADS8325_Init	4
-../Core/Src/ads8325.c:52:10:ADS8325_Read	2
-../Core/Src/ads8325.c:74:19:ADS8325_ReadN	3
-../Core/Src/ads8325.c:86:19:ADS8325_ReadN_Averaged	5

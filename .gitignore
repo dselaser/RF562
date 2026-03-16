@@ -1,0 +1,12 @@
+# Build output
+Debug/
+Release/
+
+# LVGL library (download separately)
+Drivers/lvgl/
+
+# IDE settings (optional, can be regenerated)
+.settings/
+
+# Claude Code session data
+.claude/

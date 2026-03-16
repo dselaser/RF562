@@ -105,7 +105,7 @@ void MX_TIM1_Init(void)
   HAL_TIM_MspPostInit(&htim1);
 
 }
-/* TIM6 init function — Loop1 motor control ISR (from git) */
+/* TIM6 init function */
 void MX_TIM6_Init(void)
 {
 
@@ -239,7 +239,7 @@ void HAL_TIM_Base_MspInit(TIM_HandleTypeDef* tim_baseHandle)
     __HAL_RCC_TIM6_CLK_ENABLE();
 
     /* TIM6 interrupt Init */
-    HAL_NVIC_SetPriority(TIM6_IRQn, 6, 0);
+    HAL_NVIC_SetPriority(TIM6_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(TIM6_IRQn);
   /* USER CODE BEGIN TIM6_MspInit 1 */
 
